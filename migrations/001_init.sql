@@ -25,9 +25,7 @@ CREATE TABLE IF NOT EXISTS transfers (
     status              INT         NOT NULL DEFAULT 0,
 
     created_at          TIMESTAMPTZ NOT NULL,
-    done_at             TIMESTAMPTZ,
-
-    raw_item            JSONB       NOT NULL
+    done_at             TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_transfers_status       ON transfers (status);

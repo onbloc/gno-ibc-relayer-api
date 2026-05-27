@@ -26,9 +26,9 @@ INSERT INTO transfers (
     src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
     from_address, to_address, base_token, base_amount, quote_token, quote_amount,
     height, tx_hash, timeout_timestamp,
-    status, created_at, raw_item
+    status, created_at
 ) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
 ) ON CONFLICT (id) DO NOTHING`
 
 func (r *TransferRepo) Insert(ctx context.Context, t *model.Transfer) error {
@@ -37,7 +37,7 @@ func (r *TransferRepo) Insert(ctx context.Context, t *model.Transfer) error {
 		t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
 		t.FromAddress, t.ToAddress, t.BaseToken, t.BaseAmount, t.QuoteToken, t.QuoteAmount,
 		t.Height, t.TxHash, t.TimeoutTimestamp,
-		int(t.Status), t.CreatedAt, t.RawItem,
+		int(t.Status), t.CreatedAt,
 	)
 	return err
 }
