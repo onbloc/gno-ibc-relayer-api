@@ -24,9 +24,10 @@ func New(cfg config.ServerConfig, repo *repository.TransferRepo) *Server {
 	th := handler.NewTransferHandler(repo)
 	sh := handler.NewStatsHandler(repo)
 
-	r.Get("/transfers", th.List)
-	r.Get("/transfers/{id}", th.GetByID)
-	r.Get("/stats", sh.Get)
+	r.Get("/status/{packet_hash}", th.GetByPacketHash)
+	r.Get("/wallet/{sender_address}", th.ListByWallet)
+	r.Get("/history", th.History)
+	r.Get("/summary", sh.Summary)
 
 	return &Server{cfg: cfg, mux: r}
 }

@@ -112,41 +112,34 @@ func (r *TransferRepo) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 // ── read ──────────────────────────────────────────────────────────────────────
 
 type ListFilter struct {
-	Address string // required: matches from_address OR to_address
-	Status  *int   // optional
+	Address string // optional: matches from_address OR to_address
 	Order   string // "asc" or "desc" by created_at (default "desc")
 	Limit   int
 	Offset  int
 }
 
 func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfer, error) {
-	// address is required — return empty without hitting the DB
-	if f.Address == "" {
-		return []*model.Transfer{}, nil
-	}
-
-	args := []any{f.Address}
-	query := `SELECT id, packet_hash,
+	base := `SELECT id, packet_hash,
                      src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                      from_address, to_address, base_token, base_amount, quote_token, quote_amount,
                      height, tx_hash, timeout_timestamp,
                      status, created_at, done_at
-              FROM transfers
-              WHERE (from_address=$1 OR to_address=$1)`
-	n := 2
-
-	if f.Status != nil {
-		query += fmt.Sprintf(" AND status=$%d", n)
-		args = append(args, *f.Status)
-		n++
-	}
+              FROM transfers`
 
 	order := "DESC"
 	if f.Order == "asc" {
 		order = "ASC"
 	}
-	query += fmt.Sprintf(" ORDER BY created_at %s LIMIT $%d OFFSET $%d", order, n, n+1)
-	args = append(args, f.Limit, f.Offset)
+
+	var query string
+	var args []any
+	if f.Address != "" {
+		query = fmt.Sprintf("%s WHERE (from_address=$1 OR to_address=$1) ORDER BY created_at %s LIMIT $2 OFFSET $3", base, order)
+		args = []any{f.Address, f.Limit, f.Offset}
+	} else {
+		query = fmt.Sprintf("%s ORDER BY created_at %s LIMIT $1 OFFSET $2", base, order)
+		args = []any{f.Limit, f.Offset}
+	}
 
 	rows, err := r.db.Query(ctx, query, args...)
 	if err != nil {
@@ -165,38 +158,22 @@ func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfe
 	return transfers, rows.Err()
 }
 
-func (r *TransferRepo) GetByID(ctx context.Context, id int64) (*model.Transfer, error) {
+func (r *TransferRepo) GetByPacketHash(ctx context.Context, packetHash string) (*model.Transfer, error) {
 	row := r.db.QueryRow(ctx,
 		`SELECT id, packet_hash,
                 src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                 from_address, to_address, base_token, base_amount, quote_token, quote_amount,
                 height, tx_hash, timeout_timestamp,
                 status, created_at, done_at
-         FROM transfers WHERE id=$1`, id,
+         FROM transfers WHERE packet_hash=$1`, packetHash,
 	)
 	return scanTransfer(row)
 }
 
-type Stats struct {
-	Total      int64 `json:"total"`
-	Detected   int64 `json:"detected"`
-	Processing int64 `json:"processing"`
-	Done       int64 `json:"done"`
-	Failed     int64 `json:"failed"`
-}
-
-func (r *TransferRepo) GetStats(ctx context.Context) (*Stats, error) {
-	var s Stats
-	err := r.db.QueryRow(ctx, `
-		SELECT
-			COUNT(*)                                  AS total,
-			COUNT(*) FILTER (WHERE status=0)          AS detected,
-			COUNT(*) FILTER (WHERE status=1)          AS processing,
-			COUNT(*) FILTER (WHERE status=2)          AS done,
-			COUNT(*) FILTER (WHERE status=3)          AS failed
-		FROM transfers`,
-	).Scan(&s.Total, &s.Detected, &s.Processing, &s.Done, &s.Failed)
-	return &s, err
+func (r *TransferRepo) Count(ctx context.Context) (int64, error) {
+	var count int64
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transfers`).Scan(&count)
+	return count, err
 }
 
 // ── scan ─────────────────────────────────────────────────────────────────────
