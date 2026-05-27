@@ -92,65 +92,77 @@ go run ./cmd/server -config config.toml
 
 ## API
 
-### GET `/transfers/{id}`
+### GET `/status/{packet_hash}`
 
-Fetch a single transfer by its relayer queue ID.
-
-```bash
-curl http://localhost:8080/transfers/74939729
-```
-
----
-
-### GET `/transfers`
-
-List transfers by wallet address. `address` is required — omitting it returns an empty array.
-
-| Parameter | Type   | Required | Description                              |
-|-----------|--------|----------|------------------------------------------|
-| `address` | string | yes      | Matches `from_address` OR `to_address`   |
-| `status`  | int    | no       | Filter by status (0–3). Omit for all.    |
-| `order`   | string | no       | `desc` (default, newest first) or `asc`  |
-| `limit`   | int    | no       | Max results, default 20, max 100         |
-| `offset`  | int    | no       | Pagination offset                        |
+Fetch a single transfer by its packet hash.
 
 ```bash
-# All transfers for a wallet
-curl "http://localhost:8080/transfers?address=0xf4ad3b02d44fa88371ef8faa232f789068b5f56b"
-
-# Only completed transfers
-curl "http://localhost:8080/transfers?address=g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5&status=2"
-
-# Oldest first
-curl "http://localhost:8080/transfers?address=0xf4ad3b02...&order=asc"
+curl http://localhost:8080/status/0xfd67a60d...
 ```
 
 **Response**
 
 ```json
 {
-  "data": [
-    {
-      "id": 74939729,
-      "packet_hash": "0xfd67a60d...",
-      "src_chain_id": "dev",
-      "dst_chain_id": "11155111",
-      "src_channel_id": 2,
-      "dst_channel_id": 28,
-      "from_address": "g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5",
-      "to_address": "0xf4ad3b02d44fa88371ef8faa232f789068b5f56b",
-      "base_token": "0x7fed1d819109fb7a095137bf867abe61db36c99c",
-      "base_amount": "1000000",
-      "quote_token": "ugnot",
-      "quote_amount": "1000000",
-      "height": 81037,
-      "tx_hash": "0x3966e3f3...",
-      "timeout_timestamp": 1779859590954000000,
-      "status": 2,
-      "created_at": "2026-05-26T05:28:50Z",
-      "done_at": "2026-05-26T05:29:12Z"
-    }
-  ],
+  "id": 74939729,
+  "packet_hash": "0xfd67a60d...",
+  "src_chain_id": "dev",
+  "dst_chain_id": "11155111",
+  "src_channel_id": 2,
+  "dst_channel_id": 28,
+  "from_address": "g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5",
+  "to_address": "0xf4ad3b02d44fa88371ef8faa232f789068b5f56b",
+  "base_token": "0x7fed1d819109fb7a095137bf867abe61db36c99c",
+  "base_amount": "1000000",
+  "quote_token": "ugnot",
+  "quote_amount": "1000000",
+  "height": 81037,
+  "tx_hash": "0x3966e3f3...",
+  "timeout_timestamp": 1779859590954000000,
+  "status": 2,
+  "created_at": "2026-05-26T05:28:50Z",
+  "done_at": "2026-05-26T05:29:12Z"
+}
+```
+
+---
+
+### GET `/wallet/{sender_address}`
+
+List transfers by wallet address. Matches `from_address` OR `to_address`.
+
+| Parameter | Type   | Required | Description                             |
+|-----------|--------|----------|-----------------------------------------|
+| `orderby` | string | no       | `desc` (default, newest first) or `asc` |
+| `limit`   | int    | no       | Max results, default 20, max 100        |
+| `offset`  | int    | no       | Pagination offset                       |
+
+```bash
+curl "http://localhost:8080/wallet/g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5"
+curl "http://localhost:8080/wallet/0xf4ad3b02d44fa88371ef8faa232f789068b5f56b?orderby=asc&limit=50"
+```
+
+---
+
+### GET `/history`
+
+List all transfers regardless of address.
+
+| Parameter | Type   | Required | Description                             |
+|-----------|--------|----------|-----------------------------------------|
+| `orderby` | string | no       | `desc` (default, newest first) or `asc` |
+| `limit`   | int    | no       | Max results, default 20, max 100        |
+| `offset`  | int    | no       | Pagination offset                       |
+
+```bash
+curl "http://localhost:8080/history?limit=50&orderby=asc"
+```
+
+**Response** (`/wallet` and `/history` share the same shape)
+
+```json
+{
+  "data": [...],
   "limit": 20,
   "offset": 0
 }
@@ -158,18 +170,16 @@ curl "http://localhost:8080/transfers?address=0xf4ad3b02...&order=asc"
 
 ---
 
-### GET `/stats`
+### GET `/summary`
+
+Returns the total number of tracked `packet_send` events.
 
 ```bash
-curl http://localhost:8080/stats
+curl http://localhost:8080/summary
 ```
 
 ```json
 {
-  "total": 1024,
-  "detected": 3,
-  "processing": 5,
-  "done": 1010,
-  "failed": 6
+  "total": 1024
 }
 ```
