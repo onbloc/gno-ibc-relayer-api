@@ -44,7 +44,7 @@ type packetSendValue struct {
 // ── public API ────────────────────────────────────────────────────────────────
 
 // Parse converts a raw voyager item into a Transfer.
-// Returns (nil, nil) for non-packet_send events and union relay packets.
+// Returns (nil, nil) for irrelevant events and union relay packets.
 func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.ChannelChain) (*model.Transfer, error) {
 	var outer typedValue
 	if err := json.Unmarshal(rawItem, &outer); err != nil {
@@ -74,13 +74,22 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 	if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
 		return nil, fmt.Errorf("parser: decode chain event: %w", err)
 	}
-	if chainEvent.Event.Type != "packet_send" {
+
+	switch chainEvent.Event.Type {
+	case "packet_send":
+		return parsePacketSend(id, body.Plugin, chainEvent, chains, createdAt)
+	case "packet_recv":
+		return parsePacketRecv(id, chainEvent, chains, createdAt)
+	default:
 		return nil, nil
 	}
+}
 
+// parsePacketSend handles gno→eth direction: packet_send from the source chain.
+func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*model.Transfer, error) {
 	// extract source chain from plugin name
 	// e.g. "voyager-event-source-plugin-gno/dev" → "dev"
-	srcChainID := chainFromPlugin(body.Plugin)
+	srcChainID := chainFromPlugin(plugin)
 	if srcChainID == "" {
 		return nil, nil
 	}
@@ -90,12 +99,32 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 		return nil, fmt.Errorf("parser: decode packet_send: %w", err)
 	}
 
-	// look up destination chain — returns "" for union relay packets
+	// returns "" for union relay packets (not in our channel map)
 	dstChainID := findDstChain(chains, srcChainID, ev.SourceChannelID)
 	if dstChainID == "" {
 		return nil, nil
 	}
 
+	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, createdAt)
+}
+
+// parsePacketRecv handles eth→gno direction: packet_recv on the destination chain.
+// The source chain is identified by source_channel_id in the event (e.g. 28 → eth).
+func parsePacketRecv(id int64, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*model.Transfer, error) {
+	var ev packetSendValue
+	if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
+		return nil, fmt.Errorf("parser: decode packet_recv: %w", err)
+	}
+
+	srcChainID, dstChainID := findChainsBySourceChannel(chains, ev.SourceChannelID)
+	if srcChainID == "" {
+		return nil, nil
+	}
+
+	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, createdAt)
+}
+
+func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, createdAt time.Time) (*model.Transfer, error) {
 	height, _ := strconv.ParseInt(chainEvent.Height, 10, 64)
 
 	t := &model.Transfer{
@@ -110,7 +139,6 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 		TimeoutTimestamp: ev.TimeoutTimestamp,
 		Status:           model.StatusDetected,
 		CreatedAt:        createdAt,
-		RawItem:          rawItem,
 	}
 
 	if err := decodePacketData(t, ev.PacketData); err != nil {
@@ -169,6 +197,17 @@ func findDstChain(chains []config.ChannelChain, srcChainID string, srcChannelID 
 		}
 	}
 	return ""
+}
+
+// findChainsBySourceChannel looks up src/dst chain IDs by source channel ID alone.
+// Used for packet_recv events where the plugin chain is the destination, not the source.
+func findChainsBySourceChannel(chains []config.ChannelChain, srcChannelID int) (srcChainID, dstChainID string) {
+	for _, cc := range chains {
+		if cc.SrcChannelID == srcChannelID {
+			return cc.SrcChainID, cc.DstChainID
+		}
+	}
+	return "", ""
 }
 
 // renderBytes renders bytes as a UTF-8 string (gno bech32) or 0x hex (EVM address).
