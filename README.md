@@ -6,26 +6,20 @@ A lightweight Go API server that indexes IBC packet transfer events from the [Un
 
 The Union relayer processes cross-chain transfers through three tables (`queue`, `done`, `failed`). This server reads those tables, decodes the ABI-encoded `ZkgmPacket` payload, and tracks each transfer's lifecycle in a `transfers` table.
 
-```
-Union Relayer DB (read-only)          Our DB
-┌────────────────────────┐            ┌──────────────┐
-│ queue  → packet_send   │──indexer──▶│  transfers   │
-│ done                   │            │  (decoded)   │
-│ failed                 │            └──────────────┘
-└────────────────────────┘                  │
-                                        REST API
-```
-
 **Supported chains:** gno ↔ Ethereum (union is an intermediate relay and is excluded)
+
+**Event mapping per direction:**
+- **gno→eth**: detected via `packet_send` on gno queue
+- **eth→gno**: detected via `packet_recv` on gno queue (appears after gno has confirmed receipt)
 
 ### Transfer status
 
-| Value | Name       | Description                              |
-|-------|------------|------------------------------------------|
-| `0`   | detected   | `packet_send` found in relayer queue     |
-| `1`   | processing | item removed from queue, not yet settled |
-| `2`   | done       | item appeared in relayer `done` table    |
-| `3`   | failed     | item appeared in relayer `failed` table  |
+| Value | Name       | Description                                           |
+|-------|------------|-------------------------------------------------------|
+| `0`   | detected   | `packet_send` or `packet_recv` found in relayer queue |
+| `1`   | processing | item removed from queue, not yet settled              |
+| `2`   | done       | item appeared in relayer `done` table                 |
+| `3`   | failed     | item appeared in relayer `failed` table               |
 
 ## Requirements
 
@@ -172,7 +166,7 @@ curl "http://localhost:8080/history?limit=50&orderby=asc"
 
 ### GET `/summary`
 
-Returns the total number of tracked `packet_send` events.
+Returns the total number of tracked transfers (`packet_send` + `packet_recv`).
 
 ```bash
 curl http://localhost:8080/summary
