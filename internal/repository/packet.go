@@ -58,10 +58,10 @@ func (r *TransferRepo) MarkDone(ctx context.Context, id int64, doneAt time.Time)
 	return err
 }
 
-func (r *TransferRepo) MarkFailed(ctx context.Context, id int64) error {
+func (r *TransferRepo) MarkFailed(ctx context.Context, id int64, errMsg string) error {
 	_, err := r.db.Exec(ctx,
-		`UPDATE transfers SET status=$1 WHERE id=$2 AND status < $1`,
-		int(model.StatusFailed), id,
+		`UPDATE transfers SET status=$1, err_msg=$2 WHERE id=$3 AND status < $1`,
+		int(model.StatusFailed), errMsg, id,
 	)
 	return err
 }
@@ -185,7 +185,7 @@ func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfe
                      src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                      from_address, to_address, base_token, base_amount, quote_token, quote_amount,
                      height, tx_hash, timeout_timestamp,
-                     status, created_at, done_at
+                     status, created_at, done_at, err_msg
               FROM transfers`
 
 	order := "DESC"
@@ -252,7 +252,7 @@ func scanTransfer(row scanner) (*model.Transfer, error) {
 		&t.SrcChainID, &t.DstChainID, &t.SrcChannelID, &t.DstChannelID,
 		&t.FromAddress, &t.ToAddress, &t.BaseToken, &t.BaseAmount, &t.QuoteToken, &t.QuoteAmount,
 		&t.Height, &t.TxHash, &t.TimeoutTimestamp,
-		&status, &t.CreatedAt, &t.DoneAt,
+		&status, &t.CreatedAt, &t.DoneAt, &t.ErrMsg,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
