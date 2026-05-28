@@ -1,3 +1,4 @@
 gno-ibc-relayer-api
+/setup-trigger
 config.toml
 *.env
