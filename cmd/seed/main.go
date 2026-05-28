@@ -116,6 +116,17 @@ func main() {
 			doneAt = &t
 		}
 
+		var errMsg *string
+		if status == 3 {
+			msgs := []string{
+				"error in voyager-client-update-plugin-state-lens/state-lens/ics23/ics23: error in state/ibc-union/union-testnet-10: client `39` not found",
+				"error in voyager-client-update-plugin-state-lens/state-lens/ics23/mpt: error in state/ibc-union/union-testnet-10: client `4` not found",
+				"timeout waiting for packet receipt on destination chain",
+			}
+			m := msgs[rng.Intn(len(msgs))]
+			errMsg = &m
+		}
+
 		// 방향: gno→eth / eth→gno 반반
 		// targetAddress를 i < 20 이면 from 또는 to에 강제 배치
 		var srcChain, dstChain, fromAddr, toAddr, baseToken, quoteToken string
@@ -155,16 +166,16 @@ func main() {
 				from_address, to_address,
 				base_token, base_amount, quote_token, quote_amount,
 				height, tx_hash, timeout_timestamp,
-				status, created_at, done_at
+				status, created_at, done_at, err_msg
 			) VALUES (
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
 			) ON CONFLICT (id) DO NOTHING`,
 			id, packetHash,
 			srcChain, dstChain, srcChannel, dstChannel,
 			fromAddr, toAddr,
 			baseToken, amount, quoteToken, amount,
 			height, txHash, timeout,
-			status, createdAt, doneAt,
+			status, createdAt, doneAt, errMsg,
 		)
 		if err != nil {
 			log.Printf("seed: insert i=%d: %v", i, err)
