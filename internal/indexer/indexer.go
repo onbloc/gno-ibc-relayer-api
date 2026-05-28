@@ -31,8 +31,16 @@ func (idx *Indexer) Run(ctx context.Context) {
 	if err := idx.syncQueue(ctx); err != nil {
 		log.Printf("indexer: startup sync queue: %v", err)
 	}
+	if err := idx.syncDone(ctx); err != nil {
+		log.Printf("indexer: startup sync done: %v", err)
+	}
+	if err := idx.syncFailed(ctx); err != nil {
+		log.Printf("indexer: startup sync failed: %v", err)
+	}
 
 	go idx.listenQueue(ctx)
+	go idx.listenDone(ctx)
+	go idx.listenFailed(ctx)
 
 	ticker := time.NewTicker(time.Duration(idx.cfg.PollIntervalSec) * time.Second)
 	defer ticker.Stop()
@@ -50,18 +58,9 @@ func (idx *Indexer) Run(ctx context.Context) {
 	}
 }
 
-// poll handles state transitions — queue insert is covered by LISTEN/NOTIFY.
+// poll handles only processing state — done/failed are covered by LISTEN/NOTIFY.
 func (idx *Indexer) poll(ctx context.Context) error {
-	if err := idx.syncProcessing(ctx); err != nil {
-		return fmt.Errorf("sync processing: %w", err)
-	}
-	if err := idx.syncDone(ctx); err != nil {
-		return fmt.Errorf("sync done: %w", err)
-	}
-	if err := idx.syncFailed(ctx); err != nil {
-		return fmt.Errorf("sync failed: %w", err)
-	}
-	return nil
+	return idx.syncProcessing(ctx)
 }
 
 // listenQueue maintains a LISTEN connection and reconnects on error.
@@ -135,6 +134,165 @@ func (idx *Indexer) runListener(ctx context.Context) error {
 			} else {
 				log.Printf("indexer: detected id=%d via notify", id)
 			}
+		}
+	}
+}
+
+// listenDone maintains a LISTEN connection for done table inserts.
+// Marks a transfer done when packet_recv appears in done with matching timeout+channel.
+func (idx *Indexer) listenDone(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := idx.runDoneListener(ctx); err != nil {
+			log.Printf("indexer: done listener error (reconnecting in 5s): %v", err)
+			if syncErr := idx.syncDone(ctx); syncErr != nil {
+				log.Printf("indexer: reconnect sync done: %v", syncErr)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+}
+
+func (idx *Indexer) runDoneListener(ctx context.Context) error {
+	conn, err := idx.relayerDB.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "LISTEN done_insert"); err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	log.Println("indexer: listening on done_insert channel")
+
+	for {
+		notification, err := conn.Conn().WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("wait: %w", err)
+		}
+
+		id, err := strconv.ParseInt(notification.Payload, 10, 64)
+		if err != nil {
+			log.Printf("indexer: done bad payload %q: %v", notification.Payload, err)
+			continue
+		}
+
+		var item []byte
+		var createdAt time.Time
+		if err := idx.relayerDB.QueryRow(ctx,
+			`SELECT item, created_at FROM done WHERE id = $1`, id,
+		).Scan(&item, &createdAt); err != nil {
+			continue
+		}
+
+		fields := parser.ParseItemFields(item)
+		if fields == nil || fields.EventType != "packet_recv" {
+			continue
+		}
+
+		transferID, err := idx.repo.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
+		if err != nil {
+			log.Printf("indexer: done find transfer timeout=%d ch=%d: %v", fields.TimeoutTimestamp, fields.SrcChannelID, err)
+			continue
+		}
+		if transferID == 0 {
+			continue
+		}
+		if err := idx.repo.MarkDone(ctx, transferID, createdAt); err != nil {
+			log.Printf("indexer: done mark id=%d: %v", transferID, err)
+		} else {
+			log.Printf("indexer: done transfer id=%d via packet_recv notify", transferID)
+		}
+	}
+}
+
+// listenFailed maintains a LISTEN connection for failed table inserts.
+// Marks a transfer failed by matching timeout+channel from the embedded packet info.
+func (idx *Indexer) listenFailed(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := idx.runFailedListener(ctx); err != nil {
+			log.Printf("indexer: failed listener error (reconnecting in 5s): %v", err)
+			if syncErr := idx.syncFailed(ctx); syncErr != nil {
+				log.Printf("indexer: reconnect sync failed: %v", syncErr)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+}
+
+func (idx *Indexer) runFailedListener(ctx context.Context) error {
+	conn, err := idx.relayerDB.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "LISTEN failed_insert"); err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	log.Println("indexer: listening on failed_insert channel")
+
+	for {
+		notification, err := conn.Conn().WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("wait: %w", err)
+		}
+
+		id, err := strconv.ParseInt(notification.Payload, 10, 64)
+		if err != nil {
+			log.Printf("indexer: failed bad payload %q: %v", notification.Payload, err)
+			continue
+		}
+
+		var item []byte
+		if err := idx.relayerDB.QueryRow(ctx,
+			`SELECT item FROM failed WHERE id = $1`, id,
+		).Scan(&item); err != nil {
+			continue
+		}
+
+		// Try direct id match first (e.g. the original packet item itself failed).
+		if err := idx.repo.MarkFailed(ctx, id); err == nil {
+			log.Printf("indexer: failed transfer id=%d (direct)", id)
+			continue
+		}
+
+		// Fall back to timeout+channel match from embedded packet info.
+		fields := parser.ParseItemFields(item)
+		if fields == nil {
+			continue
+		}
+		transferID, err := idx.repo.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
+		if err != nil {
+			log.Printf("indexer: failed find transfer timeout=%d ch=%d: %v", fields.TimeoutTimestamp, fields.SrcChannelID, err)
+			continue
+		}
+		if transferID == 0 {
+			continue
+		}
+		if err := idx.repo.MarkFailed(ctx, transferID); err != nil {
+			log.Printf("indexer: failed mark id=%d: %v", transferID, err)
+		} else {
+			log.Printf("indexer: failed transfer id=%d via promise notify", transferID)
 		}
 	}
 }
@@ -225,45 +383,57 @@ func (idx *Indexer) syncProcessing(ctx context.Context) error {
 	return nil
 }
 
-// syncDone reads new rows from the relayer done table and marks transfers done.
-// Uses created_at-based cursor (stored as unix microseconds) to avoid missing
-// rows that appear out-of-order by id due to retried items.
+// syncDone is a startup/reconnect catch-up that scans done for packet_recv items
+// matching our in-flight transfers by timeout_timestamp.
 func (idx *Indexer) syncDone(ctx context.Context) error {
-	cursorMicros, err := idx.repo.GetCursor(ctx, "done")
-	if err != nil {
+	inFlight, err := idx.repo.GetInFlight(ctx)
+	if err != nil || len(inFlight) == 0 {
 		return err
 	}
-	cursorTime := time.UnixMicro(cursorMicros).UTC()
 
+	// Build timeout → transfer lookup.
+	timeoutMap := make(map[int64]repository.InFlightTransfer, len(inFlight))
+	var oldest time.Time
+	for _, t := range inFlight {
+		timeoutMap[t.TimeoutTimestamp] = t
+		if oldest.IsZero() || t.CreatedAt.Before(oldest) {
+			oldest = t.CreatedAt
+		}
+	}
+
+	// Scan done for packet_recv items since the oldest in-flight transfer.
 	rows, err := idx.relayerDB.Query(ctx,
-		`SELECT id, created_at FROM done WHERE created_at > $1 ORDER BY created_at, id LIMIT $2`,
-		cursorTime, idx.cfg.BatchSize,
+		`SELECT item, created_at FROM done
+		 WHERE item::text LIKE '%packet_recv%'
+		 AND created_at >= $1`,
+		oldest.Add(-time.Minute),
 	)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	var lastCreatedAt time.Time
 	for rows.Next() {
-		var id int64
+		var item []byte
 		var createdAt time.Time
-		if err := rows.Scan(&id, &createdAt); err != nil {
+		if err := rows.Scan(&item, &createdAt); err != nil {
 			return err
 		}
-		if err := idx.repo.MarkDone(ctx, id, createdAt); err != nil {
-			log.Printf("indexer: mark done id=%d: %v", id, err)
+		fields := parser.ParseItemFields(item)
+		if fields == nil || fields.EventType != "packet_recv" {
+			continue
 		}
-		lastCreatedAt = createdAt
+		t, ok := timeoutMap[fields.TimeoutTimestamp]
+		if !ok {
+			continue
+		}
+		if err := idx.repo.MarkDone(ctx, t.ID, createdAt); err != nil {
+			log.Printf("indexer: startup mark done id=%d: %v", t.ID, err)
+		} else {
+			log.Printf("indexer: startup caught done id=%d", t.ID)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	if !lastCreatedAt.IsZero() {
-		return idx.repo.SetCursor(ctx, "done", lastCreatedAt.UnixMicro())
-	}
-	return nil
+	return rows.Err()
 }
 
 // syncFailed reads new rows from the relayer failed table and marks transfers failed.

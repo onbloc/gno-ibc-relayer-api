@@ -43,6 +43,95 @@ type packetSendValue struct {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+// ItemFields holds key fields extracted from a Voyager item for matching transfers.
+type ItemFields struct {
+	EventType        string // "packet_send" or "packet_recv"
+	TimeoutTimestamp int64
+	SrcChannelID     int
+}
+
+// ParseItemFields extracts matching fields from:
+//   - make_chain_event items (call type) — used in done table
+//   - promise items with batches — used in failed table
+//
+// Returns nil for irrelevant item types.
+func ParseItemFields(raw []byte) *ItemFields {
+	var outer typedValue
+	if err := json.Unmarshal(raw, &outer); err != nil {
+		return nil
+	}
+
+	switch outer.Type {
+	case "call":
+		var callVal typedValue
+		if err := json.Unmarshal(outer.Value, &callVal); err != nil || callVal.Type != "plugin" {
+			return nil
+		}
+		var body pluginBody
+		if err := json.Unmarshal(callVal.Value, &body); err != nil || body.Message.Type != "make_chain_event" {
+			return nil
+		}
+		var chainEvent chainEventBody
+		if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
+			return nil
+		}
+		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" {
+			return nil
+		}
+		var ev packetSendValue
+		if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
+			return nil
+		}
+		return &ItemFields{
+			EventType:        chainEvent.Event.Type,
+			TimeoutTimestamp: ev.TimeoutTimestamp,
+			SrcChannelID:     ev.SourceChannelID,
+		}
+
+	case "promise":
+		var promise struct {
+			Receiver struct {
+				Value struct {
+					Message struct {
+						Value struct {
+							Batches [][]struct {
+								Event struct {
+									Type  string `json:"@type"`
+									Value struct {
+										Packet struct {
+											TimeoutTimestamp int64 `json:"timeout_timestamp"`
+											SourceChannel    struct {
+												ChannelID int `json:"channel_id"`
+											} `json:"source_channel"`
+										} `json:"packet"`
+									} `json:"@value"`
+								} `json:"event"`
+							} `json:"batches"`
+						} `json:"@value"`
+					} `json:"message"`
+				} `json:"@value"`
+			} `json:"receiver"`
+		}
+		if err := json.Unmarshal(outer.Value, &promise); err != nil {
+			return nil
+		}
+		for _, batch := range promise.Receiver.Value.Message.Value.Batches {
+			for _, entry := range batch {
+				ts := entry.Event.Value.Packet.TimeoutTimestamp
+				ch := entry.Event.Value.Packet.SourceChannel.ChannelID
+				if ts != 0 {
+					return &ItemFields{
+						EventType:        entry.Event.Type,
+						TimeoutTimestamp: ts,
+						SrcChannelID:     ch,
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Parse converts a raw voyager item into a Transfer.
 // Returns (nil, nil) for irrelevant events and union relay packets.
 func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.ChannelChain) (*model.Transfer, error) {
