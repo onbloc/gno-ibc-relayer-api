@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,9 +25,17 @@ func New(relayerDB *pgxpool.Pool, repo *repository.TransferRepo, cfg config.Inde
 }
 
 func (idx *Indexer) Run(ctx context.Context) {
+	log.Println("indexer: started")
+
+	// Catch up on items inserted while the app was down.
+	if err := idx.syncQueue(ctx); err != nil {
+		log.Printf("indexer: startup sync queue: %v", err)
+	}
+
+	go idx.listenQueue(ctx)
+
 	ticker := time.NewTicker(time.Duration(idx.cfg.PollIntervalSec) * time.Second)
 	defer ticker.Stop()
-	log.Println("indexer: started")
 
 	for {
 		select {
@@ -41,10 +50,8 @@ func (idx *Indexer) Run(ctx context.Context) {
 	}
 }
 
+// poll handles state transitions — queue insert is covered by LISTEN/NOTIFY.
 func (idx *Indexer) poll(ctx context.Context) error {
-	if err := idx.syncQueue(ctx); err != nil {
-		return fmt.Errorf("sync queue: %w", err)
-	}
 	if err := idx.syncProcessing(ctx); err != nil {
 		return fmt.Errorf("sync processing: %w", err)
 	}
@@ -57,8 +64,83 @@ func (idx *Indexer) poll(ctx context.Context) error {
 	return nil
 }
 
-// syncQueue reads new packet_send events from the relayer queue and inserts
-// them as status=detected (0).
+// listenQueue maintains a LISTEN connection and reconnects on error.
+func (idx *Indexer) listenQueue(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := idx.runListener(ctx); err != nil {
+			log.Printf("indexer: listener error (reconnecting in 5s): %v", err)
+			// Catch up on missed items before reconnecting.
+			if syncErr := idx.syncQueue(ctx); syncErr != nil {
+				log.Printf("indexer: reconnect sync queue: %v", syncErr)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}
+}
+
+// runListener blocks until the context is cancelled or the connection breaks.
+func (idx *Indexer) runListener(ctx context.Context) error {
+	conn, err := idx.relayerDB.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "LISTEN queue_insert"); err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	log.Println("indexer: listening on queue_insert channel")
+
+	for {
+		notification, err := conn.Conn().WaitForNotification(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("wait: %w", err)
+		}
+
+		id, err := strconv.ParseInt(notification.Payload, 10, 64)
+		if err != nil {
+			log.Printf("indexer: listen bad payload %q: %v", notification.Payload, err)
+			continue
+		}
+
+		var item []byte
+		var createdAt time.Time
+		if err := idx.relayerDB.QueryRow(ctx,
+			`SELECT item, created_at FROM queue WHERE id = $1`, id,
+		).Scan(&item, &createdAt); err != nil {
+			// Item already picked up by Voyager before we could read it.
+			// syncDone/syncFailed will handle it in the next poll cycle.
+			log.Printf("indexer: queue id=%d gone before read (syncDone will catch it)", id)
+			continue
+		}
+
+		t, err := parser.Parse(id, item, createdAt, idx.chains)
+		if err != nil {
+			log.Printf("indexer: listen parse id=%d: %v", id, err)
+			continue
+		}
+		if t != nil {
+			if err := idx.repo.Insert(ctx, t); err != nil {
+				log.Printf("indexer: listen insert id=%d: %v", id, err)
+			} else {
+				log.Printf("indexer: detected id=%d via notify", id)
+			}
+		}
+	}
+}
+
+// syncQueue reads new items from the relayer queue using a cursor and inserts
+// them as status=detected. Used on startup and after listener reconnects.
 func (idx *Indexer) syncQueue(ctx context.Context) error {
 	cursor, err := idx.repo.GetCursor(ctx, "queue")
 	if err != nil {
@@ -111,7 +193,6 @@ func (idx *Indexer) syncProcessing(ctx context.Context) error {
 		return err
 	}
 
-	// check which IDs are still in the relayer queue
 	rows, err := idx.relayerDB.Query(ctx,
 		`SELECT id FROM queue WHERE id = ANY($1)`, detectedIDs,
 	)
@@ -132,7 +213,6 @@ func (idx *Indexer) syncProcessing(ctx context.Context) error {
 		return err
 	}
 
-	// IDs no longer in queue → mark processing
 	var gone []int64
 	for _, id := range detectedIDs {
 		if !inQueue[id] {
@@ -178,7 +258,14 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 	}
 
 	if lastID > 0 {
-		return idx.repo.SetCursor(ctx, "done", lastID)
+		if err := idx.repo.SetCursor(ctx, "done", lastID); err != nil {
+			return err
+		}
+		if _, err := idx.relayerDB.Exec(ctx,
+			`DELETE FROM done WHERE id <= $1`, lastID,
+		); err != nil {
+			log.Printf("indexer: cleanup done id<=%d: %v", lastID, err)
+		}
 	}
 	return nil
 }
