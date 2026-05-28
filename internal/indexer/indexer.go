@@ -226,22 +226,25 @@ func (idx *Indexer) syncProcessing(ctx context.Context) error {
 }
 
 // syncDone reads new rows from the relayer done table and marks transfers done.
+// Uses created_at-based cursor (stored as unix microseconds) to avoid missing
+// rows that appear out-of-order by id due to retried items.
 func (idx *Indexer) syncDone(ctx context.Context) error {
-	cursor, err := idx.repo.GetCursor(ctx, "done")
+	cursorMicros, err := idx.repo.GetCursor(ctx, "done")
 	if err != nil {
 		return err
 	}
+	cursorTime := time.UnixMicro(cursorMicros).UTC()
 
 	rows, err := idx.relayerDB.Query(ctx,
-		`SELECT id, created_at FROM done WHERE id > $1 ORDER BY id LIMIT $2`,
-		cursor, idx.cfg.BatchSize,
+		`SELECT id, created_at FROM done WHERE created_at > $1 ORDER BY created_at, id LIMIT $2`,
+		cursorTime, idx.cfg.BatchSize,
 	)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	var lastID int64
+	var lastCreatedAt time.Time
 	for rows.Next() {
 		var id int64
 		var createdAt time.Time
@@ -251,26 +254,21 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 		if err := idx.repo.MarkDone(ctx, id, createdAt); err != nil {
 			log.Printf("indexer: mark done id=%d: %v", id, err)
 		}
-		lastID = id
+		lastCreatedAt = createdAt
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	if lastID > 0 {
-		if err := idx.repo.SetCursor(ctx, "done", lastID); err != nil {
-			return err
-		}
-		if _, err := idx.relayerDB.Exec(ctx,
-			`DELETE FROM done WHERE id <= $1`, lastID,
-		); err != nil {
-			log.Printf("indexer: cleanup done id<=%d: %v", lastID, err)
-		}
+	if !lastCreatedAt.IsZero() {
+		return idx.repo.SetCursor(ctx, "done", lastCreatedAt.UnixMicro())
 	}
 	return nil
 }
 
 // syncFailed reads new rows from the relayer failed table and marks transfers failed.
+// If the failed item is not directly in our transfers (it may be a descendant op),
+// it traverses the parents chain through the done table to find the origin transfer.
 func (idx *Indexer) syncFailed(ctx context.Context) error {
 	cursor, err := idx.repo.GetCursor(ctx, "failed")
 	if err != nil {
@@ -278,7 +276,7 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 	}
 
 	rows, err := idx.relayerDB.Query(ctx,
-		`SELECT id FROM failed WHERE id > $1 ORDER BY id LIMIT $2`,
+		`SELECT id, parents FROM failed WHERE id > $1 ORDER BY id LIMIT $2`,
 		cursor, idx.cfg.BatchSize,
 	)
 	if err != nil {
@@ -289,12 +287,27 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 	var lastID int64
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var parents []int64
+		if err := rows.Scan(&id, &parents); err != nil {
 			return err
 		}
+
 		if err := idx.repo.MarkFailed(ctx, id); err != nil {
 			log.Printf("indexer: mark failed id=%d: %v", id, err)
+		} else {
+			// Direct match — also check ancestors in case a parent transfer
+			// should be marked failed (e.g. the packet_send that spawned this op).
+			if ancestorID, err := idx.traceFailedAncestor(ctx, parents); err != nil {
+				log.Printf("indexer: trace ancestor id=%d: %v", id, err)
+			} else if ancestorID > 0 && ancestorID != id {
+				if err := idx.repo.MarkFailed(ctx, ancestorID); err != nil {
+					log.Printf("indexer: mark failed ancestor id=%d: %v", ancestorID, err)
+				} else {
+					log.Printf("indexer: marked origin transfer id=%d failed via descendant id=%d", ancestorID, id)
+				}
+			}
 		}
+
 		lastID = id
 	}
 	if err := rows.Err(); err != nil {
@@ -305,4 +318,42 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 		return idx.repo.SetCursor(ctx, "failed", lastID)
 	}
 	return nil
+}
+
+// traceFailedAncestor walks the parents chain through the done table (up to 8 hops)
+// and returns the first ancestor id that exists in our transfers table.
+func (idx *Indexer) traceFailedAncestor(ctx context.Context, startParents []int64) (int64, error) {
+	if len(startParents) == 0 {
+		return 0, nil
+	}
+
+	visited := make(map[int64]bool)
+	current := startParents
+
+	for depth := 0; depth < 8 && len(current) > 0; depth++ {
+		// Check if any current id is in our transfers.
+		if id, err := idx.repo.FindAncestor(ctx, current); err != nil {
+			return 0, err
+		} else if id > 0 {
+			return id, nil
+		}
+
+		// Follow parents one level up via done table.
+		var next []int64
+		for _, pid := range current {
+			if visited[pid] {
+				continue
+			}
+			visited[pid] = true
+
+			var grandparents []int64
+			if err := idx.relayerDB.QueryRow(ctx,
+				`SELECT parents FROM done WHERE id = $1`, pid,
+			).Scan(&grandparents); err == nil {
+				next = append(next, grandparents...)
+			}
+		}
+		current = next
+	}
+	return 0, nil
 }

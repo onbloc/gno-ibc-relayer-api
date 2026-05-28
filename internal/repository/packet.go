@@ -88,6 +88,23 @@ func (r *TransferRepo) SetCursor(ctx context.Context, name string, id int64) err
 	return err
 }
 
+// FindAncestor returns the first id from the given list that exists in transfers
+// with status < failed. Used to trace a failed Voyager op back to its origin transfer.
+func (r *TransferRepo) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var id int64
+	err := r.db.QueryRow(ctx,
+		`SELECT id FROM transfers WHERE id = ANY($1) AND status < $2 LIMIT 1`,
+		ids, int(model.StatusFailed),
+	).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
 // GetDetectedIDs returns IDs of transfers currently in status=detected.
 func (r *TransferRepo) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 	rows, err := r.db.Query(ctx,
