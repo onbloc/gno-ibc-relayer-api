@@ -30,10 +30,16 @@ seed:
 seed-clean:
 	go run ./cmd/seed -config $(CONFIG) -truncate
 
-# drop all tables (transfers, indexer_cursors)
+# drop all tables and pg_notify triggers/functions
 drop:
 	psql "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) dbname=$(DB_NAME)" \
-		-c "DROP TABLE IF EXISTS transfers; DROP TABLE IF EXISTS indexer_cursors;"
+		-c "DROP TABLE IF EXISTS transfers; DROP TABLE IF EXISTS indexer_cursors; \
+		    DROP TRIGGER IF EXISTS queue_insert_trigger ON queue; \
+		    DROP TRIGGER IF EXISTS done_insert_trigger ON done; \
+		    DROP TRIGGER IF EXISTS failed_insert_trigger ON failed; \
+		    DROP FUNCTION IF EXISTS notify_queue_insert; \
+		    DROP FUNCTION IF EXISTS notify_done_insert; \
+		    DROP FUNCTION IF EXISTS notify_failed_insert;"
 
 tidy:
 	go mod tidy
