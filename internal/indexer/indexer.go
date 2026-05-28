@@ -264,14 +264,15 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 		}
 
 		var item []byte
+		var errMsg string
 		if err := idx.relayerDB.QueryRow(ctx,
-			`SELECT item FROM failed WHERE id = $1`, id,
-		).Scan(&item); err != nil {
+			`SELECT item, message FROM failed WHERE id = $1`, id,
+		).Scan(&item, &errMsg); err != nil {
 			continue
 		}
 
 		// Try direct id match first (e.g. the original packet item itself failed).
-		if err := idx.repo.MarkFailed(ctx, id); err == nil {
+		if err := idx.repo.MarkFailed(ctx, id, errMsg); err == nil {
 			log.Printf("indexer: failed transfer id=%d (direct)", id)
 			continue
 		}
@@ -289,7 +290,7 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 		if transferID == 0 {
 			continue
 		}
-		if err := idx.repo.MarkFailed(ctx, transferID); err != nil {
+		if err := idx.repo.MarkFailed(ctx, transferID, errMsg); err != nil {
 			log.Printf("indexer: failed mark id=%d: %v", transferID, err)
 		} else {
 			log.Printf("indexer: failed transfer id=%d via promise notify", transferID)
@@ -446,7 +447,7 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 	}
 
 	rows, err := idx.relayerDB.Query(ctx,
-		`SELECT id, parents FROM failed WHERE id > $1 ORDER BY id LIMIT $2`,
+		`SELECT id, parents, message FROM failed WHERE id > $1 ORDER BY id LIMIT $2`,
 		cursor, idx.cfg.BatchSize,
 	)
 	if err != nil {
@@ -458,11 +459,12 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 	for rows.Next() {
 		var id int64
 		var parents []int64
-		if err := rows.Scan(&id, &parents); err != nil {
+		var errMsg string
+		if err := rows.Scan(&id, &parents, &errMsg); err != nil {
 			return err
 		}
 
-		if err := idx.repo.MarkFailed(ctx, id); err != nil {
+		if err := idx.repo.MarkFailed(ctx, id, errMsg); err != nil {
 			log.Printf("indexer: mark failed id=%d: %v", id, err)
 		} else {
 			// Direct match — also check ancestors in case a parent transfer
@@ -470,7 +472,7 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 			if ancestorID, err := idx.traceFailedAncestor(ctx, parents); err != nil {
 				log.Printf("indexer: trace ancestor id=%d: %v", id, err)
 			} else if ancestorID > 0 && ancestorID != id {
-				if err := idx.repo.MarkFailed(ctx, ancestorID); err != nil {
+				if err := idx.repo.MarkFailed(ctx, ancestorID, errMsg); err != nil {
 					log.Printf("indexer: mark failed ancestor id=%d: %v", ancestorID, err)
 				} else {
 					log.Printf("indexer: marked origin transfer id=%d failed via descendant id=%d", ancestorID, id)

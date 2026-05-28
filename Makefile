@@ -10,10 +10,12 @@ DB_NAME ?= voyager
 build:
 	go build -o $(BINARY) ./cmd/server
 
-# create tables and install pg_notify trigger on the relayer queue (run once)
+# create tables, run migrations, and install pg_notify triggers (run once)
 init:
 	psql "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) dbname=$(DB_NAME)" \
 		-f migrations/001_init.sql
+	psql "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) dbname=$(DB_NAME)" \
+		-f migrations/002_add_err_msg.sql
 	go run ./cmd/setup-trigger -config $(CONFIG)
 
 # build and start the server in the background, logs go to indexer.log

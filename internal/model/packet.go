@@ -34,4 +34,5 @@ type Transfer struct {
 	Status    TransferStatus `json:"status"`
 	CreatedAt time.Time      `json:"created_at"`
 	DoneAt    *time.Time     `json:"done_at,omitempty"`
+	ErrMsg    *string        `json:"err_msg,omitempty"`
 }
