@@ -42,13 +42,6 @@ var triggers = []triggerDef{
 	},
 }
 
-func checkFnSQL(name string) string {
-	return `SELECT EXISTS (
-		SELECT 1 FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = 'public' AND p.proname = '` + name + `'
-	)`
-}
 
 func checkTgSQL(table, name string) string {
 	return `SELECT EXISTS (
@@ -98,39 +91,28 @@ func main() {
 	}
 	defer relayerDB.Close()
 
-	allDone := true
 	for _, t := range triggers {
-		var fnExists, tgExists bool
-		if err := relayerDB.QueryRow(ctx, checkFnSQL(t.fnName)).Scan(&fnExists); err != nil {
-			log.Fatalf("check function %s: %v", t.fnName, err)
+		// Always re-run CREATE OR REPLACE FUNCTION so filter changes take effect.
+		if _, err := relayerDB.Exec(ctx, createFnSQL(t.fnName, t.channel, t.filter)); err != nil {
+			log.Fatalf("create function %s: %v", t.fnName, err)
 		}
+		log.Printf("function ready: %s", t.fnName)
+
+		// Trigger is not idempotent — only create if missing.
+		// Existing trigger automatically picks up the updated function.
+		var tgExists bool
 		if err := relayerDB.QueryRow(ctx, checkTgSQL(t.table, t.tgName)).Scan(&tgExists); err != nil {
 			log.Fatalf("check trigger %s: %v", t.tgName, err)
 		}
-
-		if fnExists && tgExists {
-			log.Printf("already set up: %s + %s", t.fnName, t.tgName)
+		if tgExists {
+			log.Printf("trigger already exists: %s", t.tgName)
 			continue
 		}
-		allDone = false
-
-		if !fnExists {
-			if _, err := relayerDB.Exec(ctx, createFnSQL(t.fnName, t.channel, t.filter)); err != nil {
-				log.Fatalf("create function %s: %v", t.fnName, err)
-			}
-			log.Printf("created function: %s", t.fnName)
+		if _, err := relayerDB.Exec(ctx, createTgSQL(t.tgName, t.table, t.fnName)); err != nil {
+			log.Fatalf("create trigger %s: %v", t.tgName, err)
 		}
-		if !tgExists {
-			if _, err := relayerDB.Exec(ctx, createTgSQL(t.tgName, t.table, t.fnName)); err != nil {
-				log.Fatalf("create trigger %s: %v", t.tgName, err)
-			}
-			log.Printf("created trigger: %s on %s", t.tgName, t.table)
-		}
+		log.Printf("created trigger: %s on %s", t.tgName, t.table)
 	}
 
-	if allDone {
-		log.Println("setup complete: all triggers already installed")
-	} else {
-		log.Println("setup complete: queue/done/failed tables will now notify on insert")
-	}
+	log.Println("setup complete")
 }
