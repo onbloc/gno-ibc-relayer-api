@@ -5,13 +5,19 @@ DB_PORT ?= 5432
 DB_USER ?= postgres
 DB_NAME ?= voyager
 
-.PHONY: build run setup-trigger migrate migrate-drop tidy
+.PHONY: build run setup-trigger seed migrate migrate-drop tidy
 
 build:
 	go build -o $(BINARY) ./cmd/server
 
 setup-trigger:
 	go run ./cmd/setup-trigger -config $(CONFIG)
+
+seed:
+	go run ./cmd/seed -config $(CONFIG)
+
+seed-clean:
+	go run ./cmd/seed -config $(CONFIG) -truncate
 
 run: build
 	./$(BINARY) -config $(CONFIG)
