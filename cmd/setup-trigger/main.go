@@ -13,14 +13,11 @@ import (
 )
 
 type triggerDef struct {
-	checkFn  string
-	checkTg  string
-	createFn string
-	createTg string
-	fnName   string
-	tgName   string
-	table    string
-	channel  string
+	fnName  string
+	tgName  string
+	table   string
+	channel string
+	filter  string // optional WHERE condition on NEW
 }
 
 var triggers = []triggerDef{
@@ -35,6 +32,7 @@ var triggers = []triggerDef{
 		tgName:  "done_insert_trigger",
 		table:   "done",
 		channel: "done_insert",
+		filter:  "NEW.item::text LIKE '%packet_recv%'",
 	},
 	{
 		fnName:  "notify_failed_insert",
@@ -60,11 +58,17 @@ func checkTgSQL(table, name string) string {
 	)`
 }
 
-func createFnSQL(fnName, channel string) string {
+func createFnSQL(fnName, channel, filter string) string {
+	body := `PERFORM pg_notify('` + channel + `', NEW.id::text);`
+	if filter != "" {
+		body = `IF ` + filter + ` THEN
+		` + body + `
+	END IF;`
+	}
 	return `CREATE OR REPLACE FUNCTION ` + fnName + `()
 	RETURNS trigger AS $$
 	BEGIN
-		PERFORM pg_notify('` + channel + `', NEW.id::text);
+		` + body + `
 		RETURN NEW;
 	END;
 	$$ LANGUAGE plpgsql;`
@@ -111,7 +115,7 @@ func main() {
 		allDone = false
 
 		if !fnExists {
-			if _, err := relayerDB.Exec(ctx, createFnSQL(t.fnName, t.channel)); err != nil {
+			if _, err := relayerDB.Exec(ctx, createFnSQL(t.fnName, t.channel, t.filter)); err != nil {
 				log.Fatalf("create function %s: %v", t.fnName, err)
 			}
 			log.Printf("created function: %s", t.fnName)
