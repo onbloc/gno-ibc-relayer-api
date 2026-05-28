@@ -88,6 +88,21 @@ func (r *TransferRepo) SetCursor(ctx context.Context, name string, id int64) err
 	return err
 }
 
+// FindByTimeoutAndChannel returns the transfer id matching the given timeout_timestamp
+// and src_channel_id with status < failed. Used to match done/failed items back to
+// the original transfer when the Voyager item id differs.
+func (r *TransferRepo) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
+	var id int64
+	err := r.db.QueryRow(ctx,
+		`SELECT id FROM transfers WHERE timeout_timestamp=$1 AND src_channel_id=$2 AND status < $3 LIMIT 1`,
+		timeoutTimestamp, srcChannelID, int(model.StatusFailed),
+	).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
 // FindAncestor returns the first id from the given list that exists in transfers
 // with status < failed. Used to trace a failed Voyager op back to its origin transfer.
 func (r *TransferRepo) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
@@ -124,6 +139,36 @@ func (r *TransferRepo) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// InFlightTransfer holds fields needed to match in-flight transfers against done/failed.
+type InFlightTransfer struct {
+	ID               int64
+	TimeoutTimestamp int64
+	SrcChannelID     int
+	CreatedAt        time.Time
+}
+
+// GetInFlight returns all transfers with status < done.
+func (r *TransferRepo) GetInFlight(ctx context.Context) ([]InFlightTransfer, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, timeout_timestamp, src_channel_id, created_at FROM transfers WHERE status < $1`,
+		int(model.StatusDone),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []InFlightTransfer
+	for rows.Next() {
+		var t InFlightTransfer
+		if err := rows.Scan(&t.ID, &t.TimeoutTimestamp, &t.SrcChannelID, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, t)
+	}
+	return result, rows.Err()
 }
 
 // ── read ──────────────────────────────────────────────────────────────────────

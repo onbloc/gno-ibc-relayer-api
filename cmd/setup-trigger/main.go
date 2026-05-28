@@ -12,39 +12,69 @@ import (
 	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
-const (
-	checkFunctionSQL = `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_proc p
-			JOIN pg_namespace n ON n.oid = p.pronamespace
-			WHERE n.nspname = 'public' AND p.proname = 'notify_queue_insert'
-		)
-	`
+type triggerDef struct {
+	checkFn  string
+	checkTg  string
+	createFn string
+	createTg string
+	fnName   string
+	tgName   string
+	table    string
+	channel  string
+}
 
-	checkTriggerSQL = `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_trigger t
-			JOIN pg_class c ON c.oid = t.tgrelid
-			WHERE c.relname = 'queue' AND t.tgname = 'queue_insert_trigger'
-		)
-	`
+var triggers = []triggerDef{
+	{
+		fnName:  "notify_queue_insert",
+		tgName:  "queue_insert_trigger",
+		table:   "queue",
+		channel: "queue_insert",
+	},
+	{
+		fnName:  "notify_done_insert",
+		tgName:  "done_insert_trigger",
+		table:   "done",
+		channel: "done_insert",
+	},
+	{
+		fnName:  "notify_failed_insert",
+		tgName:  "failed_insert_trigger",
+		table:   "failed",
+		channel: "failed_insert",
+	},
+}
 
-	createFunctionSQL = `
-		CREATE OR REPLACE FUNCTION notify_queue_insert()
-		RETURNS trigger AS $$
-		BEGIN
-			PERFORM pg_notify('queue_insert', NEW.id::text);
-			RETURN NEW;
-		END;
-		$$ LANGUAGE plpgsql;
-	`
+func checkFnSQL(name string) string {
+	return `SELECT EXISTS (
+		SELECT 1 FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'public' AND p.proname = '` + name + `'
+	)`
+}
 
-	createTriggerSQL = `
-		CREATE TRIGGER queue_insert_trigger
-		AFTER INSERT ON queue
-		FOR EACH ROW EXECUTE FUNCTION notify_queue_insert();
-	`
-)
+func checkTgSQL(table, name string) string {
+	return `SELECT EXISTS (
+		SELECT 1 FROM pg_trigger t
+		JOIN pg_class c ON c.oid = t.tgrelid
+		WHERE c.relname = '` + table + `' AND t.tgname = '` + name + `'
+	)`
+}
+
+func createFnSQL(fnName, channel string) string {
+	return `CREATE OR REPLACE FUNCTION ` + fnName + `()
+	RETURNS trigger AS $$
+	BEGIN
+		PERFORM pg_notify('` + channel + `', NEW.id::text);
+		RETURN NEW;
+	END;
+	$$ LANGUAGE plpgsql;`
+}
+
+func createTgSQL(tgName, table, fnName string) string {
+	return `CREATE TRIGGER ` + tgName + `
+	AFTER INSERT ON ` + table + `
+	FOR EACH ROW EXECUTE FUNCTION ` + fnName + `();`
+}
 
 func main() {
 	cfgPath := flag.String("config", "config.toml", "path to config file")
@@ -64,40 +94,39 @@ func main() {
 	}
 	defer relayerDB.Close()
 
-	// check function
-	var fnExists bool
-	if err := relayerDB.QueryRow(ctx, checkFunctionSQL).Scan(&fnExists); err != nil {
-		log.Fatalf("check function: %v", err)
-	}
-
-	// check trigger
-	var tgExists bool
-	if err := relayerDB.QueryRow(ctx, checkTriggerSQL).Scan(&tgExists); err != nil {
-		log.Fatalf("check trigger: %v", err)
-	}
-
-	if fnExists && tgExists {
-		log.Println("trigger already set up: notify_queue_insert function and queue_insert_trigger are both present")
-		return
-	}
-
-	if !fnExists {
-		if _, err := relayerDB.Exec(ctx, createFunctionSQL); err != nil {
-			log.Fatalf("create function: %v", err)
+	allDone := true
+	for _, t := range triggers {
+		var fnExists, tgExists bool
+		if err := relayerDB.QueryRow(ctx, checkFnSQL(t.fnName)).Scan(&fnExists); err != nil {
+			log.Fatalf("check function %s: %v", t.fnName, err)
 		}
-		log.Println("created function: notify_queue_insert")
-	} else {
-		log.Println("function already exists: notify_queue_insert")
-	}
-
-	if !tgExists {
-		if _, err := relayerDB.Exec(ctx, createTriggerSQL); err != nil {
-			log.Fatalf("create trigger: %v", err)
+		if err := relayerDB.QueryRow(ctx, checkTgSQL(t.table, t.tgName)).Scan(&tgExists); err != nil {
+			log.Fatalf("check trigger %s: %v", t.tgName, err)
 		}
-		log.Println("created trigger: queue_insert_trigger on queue table")
-	} else {
-		log.Println("trigger already exists: queue_insert_trigger")
+
+		if fnExists && tgExists {
+			log.Printf("already set up: %s + %s", t.fnName, t.tgName)
+			continue
+		}
+		allDone = false
+
+		if !fnExists {
+			if _, err := relayerDB.Exec(ctx, createFnSQL(t.fnName, t.channel)); err != nil {
+				log.Fatalf("create function %s: %v", t.fnName, err)
+			}
+			log.Printf("created function: %s", t.fnName)
+		}
+		if !tgExists {
+			if _, err := relayerDB.Exec(ctx, createTgSQL(t.tgName, t.table, t.fnName)); err != nil {
+				log.Fatalf("create trigger %s: %v", t.tgName, err)
+			}
+			log.Printf("created trigger: %s on %s", t.tgName, t.table)
+		}
 	}
 
-	log.Println("setup complete: voyager queue will now notify on insert")
+	if allDone {
+		log.Println("setup complete: all triggers already installed")
+	} else {
+		log.Println("setup complete: queue/done/failed tables will now notify on insert")
+	}
 }
