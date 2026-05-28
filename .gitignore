@@ -3,3 +3,4 @@ gno-ibc-relayer-api
 /seed
 config.toml
 *.env
+*.log
