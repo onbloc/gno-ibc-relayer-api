@@ -226,7 +226,7 @@ func (r *TransferRepo) GetByPacketHash(ctx context.Context, packetHash string) (
                 src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                 from_address, to_address, base_token, base_amount, quote_token, quote_amount,
                 height, tx_hash, timeout_timestamp,
-                status, created_at, done_at
+                status, created_at, done_at, err_msg
          FROM transfers WHERE packet_hash=$1`, packetHash,
 	)
 	return scanTransfer(row)
