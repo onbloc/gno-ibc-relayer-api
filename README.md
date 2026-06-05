@@ -32,6 +32,21 @@ failed INSERT              →  NOTIFY  →  failed (3)  +  err_msg stored
 
 Status `2 (done)` is set when a `packet_recv` event appears in the relayer's `done` table, matched by `timeout_timestamp` — confirming the packet was received on the destination chain, not just that relay was initiated.
 
+## Project Structure
+
+```
+cmd/
+  server/          # entrypoint: starts indexer + HTTP server
+  seed/            # dev tool: insert dummy transfers
+  setup-trigger/   # one-time: install pg_notify triggers
+internal/
+  config/          # config file parsing (TOML)
+  db/              # Transfer model, Store (queries), connection pool
+  indexer/         # event listener, queue sync, voyager parser
+  server/          # HTTP handlers and router
+  tools/ethabi/    # ABI decoder for ZkgmPacket (ported from gno.land)
+```
+
 ## Requirements
 
 - Go 1.22+
@@ -92,17 +107,18 @@ This runs both SQL migrations and installs `pg_notify` triggers on the relayer's
 **2. Build and run**
 
 ```bash
-make run       # builds and starts in background, logs → indexer.log
-make stop      # stop the running server
+make run    # builds and starts in background, logs → indexer.log
 ```
 
 **Other commands**
 
 ```bash
+make test        # run all unit tests
 make seed        # insert 100 dummy transfers (keeps existing data)
 make seed-clean  # truncate transfers table then insert 100 dummy transfers
 make drop        # drop all tables and remove pg_notify triggers
 make tidy        # go mod tidy
+make help        # show all available commands
 ```
 
 ## API
