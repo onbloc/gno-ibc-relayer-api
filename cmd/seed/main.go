@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -53,6 +55,14 @@ func randHex(n int) string {
 	return string(b)
 }
 
+func randTxHash(isGno bool) string {
+	if isGno {
+		b, _ := hex.DecodeString(randHex(64))
+		return base64.StdEncoding.EncodeToString(b)
+	}
+	return "0x" + randHex(64)
+}
+
 func randAmount() string {
 	amounts := []string{"1000000", "5000000", "10000000", "50000000", "100000000", "500000000"}
 	return amounts[rand.Intn(len(amounts))]
@@ -91,23 +101,23 @@ func main() {
 	for i := 0; i < 100; i++ {
 		id := int64(80000000 + i*1000 + rng.Intn(999))
 		packetHash := "0x" + randHex(64)
-		txHash := "0x" + randHex(64)
 		height := int64(80000 + rng.Intn(5000))
 		timeout := now.Add(72 * time.Hour).UnixNano()
 		createdAt := now.Add(-time.Duration(rng.Intn(72)) * time.Hour)
 
-		// 상태 분포: done 50%, processing 20%, detected 20%, failed 10%
-		statusRoll := rng.Intn(10)
+		gnoToEth := rng.Intn(2) == 0
+		txHash := randTxHash(gnoToEth)
+
+		// 상태 분포: detected 1%, failed 4%, done 95%
+		statusRoll := rng.Intn(100)
 		var status int
 		switch {
-		case statusRoll < 5:
-			status = 2 // done
-		case statusRoll < 7:
-			status = 1 // processing
-		case statusRoll < 9:
+		case statusRoll < 1:
 			status = 0 // detected
-		default:
+		case statusRoll < 5:
 			status = 3 // failed
+		default:
+			status = 2 // done
 		}
 
 		var doneAt *time.Time
@@ -132,7 +142,6 @@ func main() {
 		var srcChain, dstChain, fromAddr, toAddr, baseToken, quoteToken string
 		var srcChannel, dstChannel int
 
-		gnoToEth := rng.Intn(2) == 0
 		if gnoToEth {
 			srcChain, dstChain = "dev", "11155111"
 			srcChannel, dstChannel = 2, 28
