@@ -1,19 +1,27 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/model"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
 )
 
-type TransferHandler struct {
-	repo *repository.TransferRepo
+type transferRepository interface {
+	GetByPacketHash(ctx context.Context, packetHash string) (*model.Transfer, error)
+	List(ctx context.Context, f repository.ListFilter) ([]*model.Transfer, error)
+	Count(ctx context.Context) (int64, error)
 }
 
-func NewTransferHandler(repo *repository.TransferRepo) *TransferHandler {
+type TransferHandler struct {
+	repo transferRepository
+}
+
+func NewTransferHandler(repo transferRepository) *TransferHandler {
 	return &TransferHandler{repo: repo}
 }
 

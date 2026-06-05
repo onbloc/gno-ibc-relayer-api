@@ -201,3 +201,229 @@ func TestParse_TxHashEncoding(t *testing.T) {
 		})
 	}
 }
+
+// ── chainFromPlugin ───────────────────────────────────────────────────────────
+
+func TestChainFromPlugin(t *testing.T) {
+	cases := []struct {
+		plugin string
+		want   string
+	}{
+		{"voyager-event-source-plugin-gno/dev", "dev"},
+		{"voyager-event-source-plugin-evm/11155111", "11155111"},
+		{"a/b/c", "c"},
+		{"no-slash", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := chainFromPlugin(tc.plugin)
+		if got != tc.want {
+			t.Errorf("chainFromPlugin(%q) = %q, want %q", tc.plugin, got, tc.want)
+		}
+	}
+}
+
+// ── renderBytes ───────────────────────────────────────────────────────────────
+
+func TestRenderBytes(t *testing.T) {
+	evmAddr := []byte{0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67}
+	cases := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{"nil", nil, ""},
+		{"empty", []byte{}, ""},
+		{"ascii gno address", []byte("g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5"), "g1jg8mtutu9khhfwc4nxmuhcpftf0pajdhfvsqf5"},
+		{"null-terminated ascii", append([]byte("g1abc"), 0, 0), "g1abc"},
+		{"evm address bytes", evmAddr, "0x" + hex.EncodeToString(evmAddr)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderBytes(tc.input)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ── findDstChain ──────────────────────────────────────────────────────────────
+
+func TestFindDstChain(t *testing.T) {
+	chains := []config.ChannelChain{
+		{SrcChainID: "gno", DstChainID: "eth", SrcChannelID: 2, DstChannelID: 28},
+		{SrcChainID: "eth", DstChainID: "gno", SrcChannelID: 28, DstChannelID: 2},
+	}
+	cases := []struct {
+		srcChainID   string
+		srcChannelID int
+		want         string
+	}{
+		{"gno", 2, "eth"},
+		{"eth", 28, "gno"},
+		{"gno", 28, ""},    // wrong channel for this chain
+		{"unknown", 2, ""}, // unknown chain
+		{"gno", 99, ""},    // unknown channel
+	}
+	for _, tc := range cases {
+		got := findDstChain(chains, tc.srcChainID, tc.srcChannelID)
+		if got != tc.want {
+			t.Errorf("findDstChain(%q, %d) = %q, want %q", tc.srcChainID, tc.srcChannelID, got, tc.want)
+		}
+	}
+}
+
+// ── findChainsBySourceChannel ─────────────────────────────────────────────────
+
+func TestFindChainsBySourceChannel(t *testing.T) {
+	chains := []config.ChannelChain{
+		{SrcChainID: "gno", DstChainID: "eth", SrcChannelID: 2, DstChannelID: 28},
+		{SrcChainID: "eth", DstChainID: "gno", SrcChannelID: 28, DstChannelID: 2},
+	}
+	cases := []struct {
+		srcChannelID int
+		wantSrc      string
+		wantDst      string
+	}{
+		{2, "gno", "eth"},
+		{28, "eth", "gno"},
+		{99, "", ""},
+	}
+	for _, tc := range cases {
+		gotSrc, gotDst := findChainsBySourceChannel(chains, tc.srcChannelID)
+		if gotSrc != tc.wantSrc || gotDst != tc.wantDst {
+			t.Errorf("findChainsBySourceChannel(%d) = (%q, %q), want (%q, %q)",
+				tc.srcChannelID, gotSrc, gotDst, tc.wantSrc, tc.wantDst)
+		}
+	}
+}
+
+// ── ParseItemFields ───────────────────────────────────────────────────────────
+
+func buildPromiseItem(eventType string, timeoutTS int64, srcChannelID int) []byte {
+	item := map[string]any{
+		"@type": "promise",
+		"@value": map[string]any{
+			"receiver": map[string]any{
+				"@value": map[string]any{
+					"message": map[string]any{
+						"@value": map[string]any{
+							"batches": [][]map[string]any{
+								{
+									{
+										"event": map[string]any{
+											"@type": eventType,
+											"@value": map[string]any{
+												"packet": map[string]any{
+													"timeout_timestamp": timeoutTS,
+													"source_channel": map[string]any{
+														"channel_id": srcChannelID,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	b, _ := json.Marshal(item)
+	return b
+}
+
+func TestParseItemFields(t *testing.T) {
+	t.Run("nil on invalid JSON", func(t *testing.T) {
+		if got := ParseItemFields([]byte("notjson")); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("nil on unknown type", func(t *testing.T) {
+		raw, _ := json.Marshal(map[string]any{"@type": "other", "@value": map[string]any{}})
+		if got := ParseItemFields(raw); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("call type packet_send returns fields", func(t *testing.T) {
+		raw := buildQueueItem("voyager-event-source-plugin-gno/dev", "packet_send", "deadbeef", 2, 28)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.EventType != "packet_send" {
+			t.Errorf("EventType = %q, want packet_send", got.EventType)
+		}
+		if got.SrcChannelID != 2 {
+			t.Errorf("SrcChannelID = %d, want 2", got.SrcChannelID)
+		}
+		if got.TimeoutTimestamp != 9999999 {
+			t.Errorf("TimeoutTimestamp = %d, want 9999999", got.TimeoutTimestamp)
+		}
+	})
+	t.Run("call type packet_recv returns fields", func(t *testing.T) {
+		raw := buildQueueItem("voyager-event-source-plugin-evm/11155111", "packet_recv", "deadbeef", 28, 2)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.EventType != "packet_recv" {
+			t.Errorf("EventType = %q, want packet_recv", got.EventType)
+		}
+	})
+	t.Run("call type unknown event returns nil", func(t *testing.T) {
+		raw := buildQueueItem("voyager-event-source-plugin-gno/dev", "packet_ack", "deadbeef", 2, 28)
+		if got := ParseItemFields(raw); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("promise type returns fields", func(t *testing.T) {
+		raw := buildPromiseItem("packet_ack", 12345678, 5)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.TimeoutTimestamp != 12345678 {
+			t.Errorf("TimeoutTimestamp = %d, want 12345678", got.TimeoutTimestamp)
+		}
+		if got.SrcChannelID != 5 {
+			t.Errorf("SrcChannelID = %d, want 5", got.SrcChannelID)
+		}
+	})
+}
+
+// ── Parse: nil-return cases ───────────────────────────────────────────────────
+
+func TestParse_ReturnsNil(t *testing.T) {
+	t.Run("non-call type", func(t *testing.T) {
+		raw, _ := json.Marshal(map[string]any{"@type": "promise", "@value": map[string]any{}})
+		got, err := Parse(1, raw, time.Now(), testChains)
+		if err != nil || got != nil {
+			t.Errorf("expected (nil, nil), got (%v, %v)", got, err)
+		}
+	})
+	t.Run("call with non-plugin inner", func(t *testing.T) {
+		raw, _ := json.Marshal(map[string]any{
+			"@type": "call",
+			"@value": map[string]any{
+				"@type":  "other",
+				"@value": map[string]any{},
+			},
+		})
+		got, err := Parse(1, raw, time.Now(), testChains)
+		if err != nil || got != nil {
+			t.Errorf("expected (nil, nil), got (%v, %v)", got, err)
+		}
+	})
+	t.Run("union relay packet not in chain map", func(t *testing.T) {
+		// srcChannelID=999 is not in testChains → treated as union relay, skipped
+		raw := buildQueueItem("voyager-event-source-plugin-gno/dev", "packet_send", "deadbeef", 999, 28)
+		got, err := Parse(1, raw, time.Now(), testChains)
+		if err != nil || got != nil {
+			t.Errorf("expected (nil, nil), got (%v, %v)", got, err)
+		}
+	})
+}

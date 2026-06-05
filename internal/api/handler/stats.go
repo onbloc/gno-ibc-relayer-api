@@ -2,15 +2,13 @@ package handler
 
 import (
 	"net/http"
-
-	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
 )
 
 type StatsHandler struct {
-	repo *repository.TransferRepo
+	repo transferRepository
 }
 
-func NewStatsHandler(repo *repository.TransferRepo) *StatsHandler {
+func NewStatsHandler(repo transferRepository) *StatsHandler {
 	return &StatsHandler{repo: repo}
 }
 
