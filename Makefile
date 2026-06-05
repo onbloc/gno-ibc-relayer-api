@@ -5,7 +5,21 @@ DB_PORT ?= 5432
 DB_USER ?= postgres
 DB_NAME ?= voyager
 
-.PHONY: build run init seed seed-clean drop tidy
+.PHONY: build run init seed seed-clean drop tidy test help
+
+help:
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Targets:"
+	@echo "  build       Build the server binary"
+	@echo "  run         Build and start the server in the background (logs → indexer.log)"
+	@echo "  init        Create tables, run migrations, install pg_notify triggers (run once)"
+	@echo "  seed        Insert 100 dummy transfers (keeps existing data)"
+	@echo "  seed-clean  Truncate transfers table then insert 100 dummy transfers"
+	@echo "  drop        Drop all tables and pg_notify triggers/functions"
+	@echo "  test        Run all unit tests"
+	@echo "  tidy        Run go mod tidy"
+	@echo "  help        Show this help message"
 
 build:
 	go build -o $(BINARY) ./cmd/server
@@ -40,6 +54,9 @@ drop:
 		    DROP FUNCTION IF EXISTS notify_queue_insert; \
 		    DROP FUNCTION IF EXISTS notify_done_insert; \
 		    DROP FUNCTION IF EXISTS notify_failed_insert;"
+
+test:
+	go test ./internal/... -v
 
 tidy:
 	go mod tidy
