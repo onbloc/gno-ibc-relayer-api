@@ -1,4 +1,4 @@
-package handler
+package server
 
 import (
 	"context"
@@ -7,13 +7,12 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/model"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
 type transferRepository interface {
-	GetByPacketHash(ctx context.Context, packetHash string) (*model.Transfer, error)
-	List(ctx context.Context, f repository.ListFilter) ([]*model.Transfer, error)
+	GetByPacketHash(ctx context.Context, packetHash string) (*db.Transfer, error)
+	List(ctx context.Context, f db.ListFilter) ([]*db.Transfer, error)
 	Count(ctx context.Context) (int64, error)
 }
 
@@ -40,7 +39,7 @@ func (h *TransferHandler) ListByWallet(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := parsePagination(q)
 
-	transfers, err := h.repo.List(r.Context(), repository.ListFilter{
+	transfers, err := h.repo.List(r.Context(), db.ListFilter{
 		Address: chi.URLParam(r, "sender_address"),
 		Order:   q.Get("orderby"),
 		Limit:   limit,
@@ -58,7 +57,7 @@ func (h *TransferHandler) History(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := parsePagination(q)
 
-	transfers, err := h.repo.List(r.Context(), repository.ListFilter{
+	transfers, err := h.repo.List(r.Context(), db.ListFilter{
 		Order:  q.Get("orderby"),
 		Limit:  limit,
 		Offset: offset,
@@ -68,6 +67,24 @@ func (h *TransferHandler) History(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"data": transfers, "limit": limit, "offset": offset})
+}
+
+type StatsHandler struct {
+	repo transferRepository
+}
+
+func NewStatsHandler(repo transferRepository) *StatsHandler {
+	return &StatsHandler{repo: repo}
+}
+
+// GET /summary
+func (h *StatsHandler) Summary(w http.ResponseWriter, r *http.Request) {
+	count, err := h.repo.Count(r.Context())
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"total": count})
 }
 
 func parsePagination(q interface{ Get(string) string }) (limit, offset int) {

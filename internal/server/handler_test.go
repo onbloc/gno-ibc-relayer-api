@@ -1,4 +1,4 @@
-package handler
+package server
 
 import (
 	"context"
@@ -10,27 +10,26 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/model"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
-// stubRepo is a test double for transferRepository.
-type stubRepo struct {
-	transfer  *model.Transfer
-	transfers []*model.Transfer
+// stubStore is a test double for transferRepository.
+type stubStore struct {
+	transfer  *db.Transfer
+	transfers []*db.Transfer
 	count     int64
 	err       error
 }
 
-func (s *stubRepo) GetByPacketHash(_ context.Context, _ string) (*model.Transfer, error) {
+func (s *stubStore) GetByPacketHash(_ context.Context, _ string) (*db.Transfer, error) {
 	return s.transfer, s.err
 }
 
-func (s *stubRepo) List(_ context.Context, _ repository.ListFilter) ([]*model.Transfer, error) {
+func (s *stubStore) List(_ context.Context, _ db.ListFilter) ([]*db.Transfer, error) {
 	return s.transfers, s.err
 }
 
-func (s *stubRepo) Count(_ context.Context) (int64, error) {
+func (s *stubStore) Count(_ context.Context) (int64, error) {
 	return s.count, s.err
 }
 
@@ -65,8 +64,8 @@ func TestParsePagination(t *testing.T) {
 // ── GetByPacketHash ───────────────────────────────────────────────────────────
 
 func TestGetByPacketHash_Found(t *testing.T) {
-	want := &model.Transfer{ID: 1, PacketHash: "abc123"}
-	h := NewTransferHandler(&stubRepo{transfer: want})
+	want := &db.Transfer{ID: 1, PacketHash: "abc123"}
+	h := NewTransferHandler(&stubStore{transfer: want})
 
 	req := httptest.NewRequest(http.MethodGet, "/status/abc123", nil)
 	rctx := chi.NewRouteContext()
@@ -79,7 +78,7 @@ func TestGetByPacketHash_Found(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var got model.Transfer
+	var got db.Transfer
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -89,7 +88,7 @@ func TestGetByPacketHash_Found(t *testing.T) {
 }
 
 func TestGetByPacketHash_NotFound(t *testing.T) {
-	h := NewTransferHandler(&stubRepo{err: errors.New("not found")})
+	h := NewTransferHandler(&stubStore{err: errors.New("not found")})
 
 	req := httptest.NewRequest(http.MethodGet, "/status/missing", nil)
 	rctx := chi.NewRouteContext()
@@ -107,11 +106,11 @@ func TestGetByPacketHash_NotFound(t *testing.T) {
 // ── ListByWallet ──────────────────────────────────────────────────────────────
 
 func TestListByWallet(t *testing.T) {
-	transfers := []*model.Transfer{
+	transfers := []*db.Transfer{
 		{ID: 1, PacketHash: "hash1"},
 		{ID: 2, PacketHash: "hash2"},
 	}
-	h := NewTransferHandler(&stubRepo{transfers: transfers})
+	h := NewTransferHandler(&stubStore{transfers: transfers})
 
 	req := httptest.NewRequest(http.MethodGet, "/wallet/g1abc?limit=10&offset=5", nil)
 	rctx := chi.NewRouteContext()
@@ -125,9 +124,9 @@ func TestListByWallet(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Data   []*model.Transfer `json:"data"`
-		Limit  int               `json:"limit"`
-		Offset int               `json:"offset"`
+		Data   []*db.Transfer `json:"data"`
+		Limit  int            `json:"limit"`
+		Offset int            `json:"offset"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -144,7 +143,7 @@ func TestListByWallet(t *testing.T) {
 }
 
 func TestListByWallet_Error(t *testing.T) {
-	h := NewTransferHandler(&stubRepo{err: errors.New("db error")})
+	h := NewTransferHandler(&stubStore{err: errors.New("db error")})
 
 	req := httptest.NewRequest(http.MethodGet, "/wallet/g1abc", nil)
 	rctx := chi.NewRouteContext()
@@ -162,8 +161,8 @@ func TestListByWallet_Error(t *testing.T) {
 // ── History ───────────────────────────────────────────────────────────────────
 
 func TestHistory(t *testing.T) {
-	transfers := []*model.Transfer{{ID: 1, PacketHash: "h1"}}
-	h := NewTransferHandler(&stubRepo{transfers: transfers})
+	transfers := []*db.Transfer{{ID: 1, PacketHash: "h1"}}
+	h := NewTransferHandler(&stubStore{transfers: transfers})
 
 	req := httptest.NewRequest(http.MethodGet, "/history?limit=5", nil)
 	w := httptest.NewRecorder()
@@ -173,8 +172,8 @@ func TestHistory(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Data  []*model.Transfer `json:"data"`
-		Limit int               `json:"limit"`
+		Data  []*db.Transfer `json:"data"`
+		Limit int            `json:"limit"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -188,7 +187,7 @@ func TestHistory(t *testing.T) {
 }
 
 func TestHistory_Error(t *testing.T) {
-	h := NewTransferHandler(&stubRepo{err: errors.New("db error")})
+	h := NewTransferHandler(&stubStore{err: errors.New("db error")})
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	w := httptest.NewRecorder()
@@ -202,7 +201,7 @@ func TestHistory_Error(t *testing.T) {
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 func TestSummary(t *testing.T) {
-	h := NewStatsHandler(&stubRepo{count: 42})
+	h := NewStatsHandler(&stubStore{count: 42})
 
 	req := httptest.NewRequest(http.MethodGet, "/summary", nil)
 	w := httptest.NewRecorder()
@@ -223,7 +222,7 @@ func TestSummary(t *testing.T) {
 }
 
 func TestSummary_Error(t *testing.T) {
-	h := NewStatsHandler(&stubRepo{err: errors.New("db error")})
+	h := NewStatsHandler(&stubStore{err: errors.New("db error")})
 
 	req := httptest.NewRequest(http.MethodGet, "/summary", nil)
 	w := httptest.NewRecorder()

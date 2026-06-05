@@ -1,4 +1,4 @@
-package parser
+package indexer
 
 import (
 	"encoding/base64"
@@ -34,7 +34,7 @@ func TestIsGnoPlugin(t *testing.T) {
 
 func TestFormatTxHash(t *testing.T) {
 	rawBytes := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe}
-	hexHash := hex.EncodeToString(rawBytes)            // "deadbeefcafe"
+	hexHash := hex.EncodeToString(rawBytes)                // "deadbeefcafe"
 	b64Hash := base64.StdEncoding.EncodeToString(rawBytes) // "3q2+78r+"
 
 	cases := []struct {
@@ -262,9 +262,9 @@ func TestFindDstChain(t *testing.T) {
 	}{
 		{"gno", 2, "eth"},
 		{"eth", 28, "gno"},
-		{"gno", 28, ""},    // wrong channel for this chain
-		{"unknown", 2, ""}, // unknown chain
-		{"gno", 99, ""},    // unknown channel
+		{"gno", 28, ""},
+		{"unknown", 2, ""},
+		{"gno", 99, ""},
 	}
 	for _, tc := range cases {
 		got := findDstChain(chains, tc.srcChainID, tc.srcChannelID)
@@ -419,7 +419,6 @@ func TestParse_ReturnsNil(t *testing.T) {
 		}
 	})
 	t.Run("union relay packet not in chain map", func(t *testing.T) {
-		// srcChannelID=999 is not in testChains → treated as union relay, skipped
 		raw := buildQueueItem("voyager-event-source-plugin-gno/dev", "packet_send", "deadbeef", 999, 28)
 		got, err := Parse(1, raw, time.Now(), testChains)
 		if err != nil || got != nil {

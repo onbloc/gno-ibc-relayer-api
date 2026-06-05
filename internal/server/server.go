@@ -1,4 +1,4 @@
-package api
+package server
 
 import (
 	"fmt"
@@ -6,9 +6,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/api/handler"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/config"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
 type Server struct {
@@ -16,13 +15,13 @@ type Server struct {
 	mux *chi.Mux
 }
 
-func New(cfg config.ServerConfig, repo *repository.TransferRepo) *Server {
+func New(cfg config.ServerConfig, repo *db.Store) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	th := handler.NewTransferHandler(repo)
-	sh := handler.NewStatsHandler(repo)
+	th := NewTransferHandler(repo)
+	sh := NewStatsHandler(repo)
 
 	r.Get("/status/{packet_hash}", th.GetByPacketHash)
 	r.Get("/wallet/{sender_address}", th.ListByWallet)

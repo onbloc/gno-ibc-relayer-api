@@ -1,14 +1,14 @@
-package model
+package db
 
 import "time"
 
 type TransferStatus int
 
 const (
-	StatusDetected   TransferStatus = 0 // packet_send found in queue
-	StatusProcessing TransferStatus = 1 // removed from queue, not yet done/failed
-	StatusDone       TransferStatus = 2 // in done table
-	StatusFailed     TransferStatus = 3 // in failed table
+	StatusDetected   TransferStatus = 0
+	StatusProcessing TransferStatus = 1
+	StatusDone       TransferStatus = 2
+	StatusFailed     TransferStatus = 3
 )
 
 type Transfer struct {
@@ -27,7 +27,7 @@ type Transfer struct {
 	QuoteToken  string `json:"quote_token"`
 	QuoteAmount string `json:"quote_amount"`
 
-	Height           int64 `json:"height"`
+	Height           int64  `json:"height"`
 	TxHash           string `json:"tx_hash"`
 	TimeoutTimestamp int64  `json:"timeout_timestamp"`
 

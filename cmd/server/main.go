@@ -8,11 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/onbloc/gno-ibc-relayer-api/internal/api"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/config"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/indexer"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/repository"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/server"
 )
 
 func main() {
@@ -39,12 +38,12 @@ func main() {
 	}
 	defer appDB.Close()
 
-	repo := repository.NewTransferRepo(appDB)
+	repo := db.New(appDB)
 
 	idx := indexer.New(relayerDB, repo, cfg.Indexer, cfg.ChannelChains)
 	go idx.Run(ctx)
 
-	srv := api.New(cfg.Server, repo)
+	srv := server.New(cfg.Server, repo)
 	log.Printf("server: listening on :%d", cfg.Server.Port)
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server: %v", err)

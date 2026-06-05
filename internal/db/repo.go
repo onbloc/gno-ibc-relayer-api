@@ -1,4 +1,4 @@
-package repository
+package db
 
 import (
 	"context"
@@ -7,15 +7,14 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/onbloc/gno-ibc-relayer-api/internal/model"
 )
 
-type TransferRepo struct {
+type Store struct {
 	db *pgxpool.Pool
 }
 
-func NewTransferRepo(db *pgxpool.Pool) *TransferRepo {
-	return &TransferRepo{db: db}
+func New(db *pgxpool.Pool) *Store {
+	return &Store{db: db}
 }
 
 // ── write ─────────────────────────────────────────────────────────────────────
@@ -31,7 +30,7 @@ INSERT INTO transfers (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
 ) ON CONFLICT (id) DO NOTHING`
 
-func (r *TransferRepo) Insert(ctx context.Context, t *model.Transfer) error {
+func (r *Store) Insert(ctx context.Context, t *Transfer) error {
 	_, err := r.db.Exec(ctx, sqlInsert,
 		t.ID, t.PacketHash,
 		t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
@@ -42,33 +41,33 @@ func (r *TransferRepo) Insert(ctx context.Context, t *model.Transfer) error {
 	return err
 }
 
-func (r *TransferRepo) MarkProcessing(ctx context.Context, ids []int64) error {
+func (r *Store) MarkProcessing(ctx context.Context, ids []int64) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1 WHERE id = ANY($2) AND status=$3`,
-		int(model.StatusProcessing), ids, int(model.StatusDetected),
+		int(StatusProcessing), ids, int(StatusDetected),
 	)
 	return err
 }
 
-func (r *TransferRepo) MarkDone(ctx context.Context, id int64, doneAt time.Time) error {
+func (r *Store) MarkDone(ctx context.Context, id int64, doneAt time.Time) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1, done_at=$2 WHERE id=$3 AND status < $1`,
-		int(model.StatusDone), doneAt, id,
+		int(StatusDone), doneAt, id,
 	)
 	return err
 }
 
-func (r *TransferRepo) MarkFailed(ctx context.Context, id int64, errMsg string) error {
+func (r *Store) MarkFailed(ctx context.Context, id int64, errMsg string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1, err_msg=$2 WHERE id=$3 AND status < $1`,
-		int(model.StatusFailed), errMsg, id,
+		int(StatusFailed), errMsg, id,
 	)
 	return err
 }
 
 // ── cursor ────────────────────────────────────────────────────────────────────
 
-func (r *TransferRepo) GetCursor(ctx context.Context, name string) (int64, error) {
+func (r *Store) GetCursor(ctx context.Context, name string) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT last_id FROM indexer_cursors WHERE name=$1`, name,
@@ -79,7 +78,7 @@ func (r *TransferRepo) GetCursor(ctx context.Context, name string) (int64, error
 	return id, nil
 }
 
-func (r *TransferRepo) SetCursor(ctx context.Context, name string, id int64) error {
+func (r *Store) SetCursor(ctx context.Context, name string, id int64) error {
 	_, err := r.db.Exec(ctx,
 		`INSERT INTO indexer_cursors (name, last_id) VALUES ($1,$2)
          ON CONFLICT (name) DO UPDATE SET last_id = EXCLUDED.last_id`,
@@ -88,14 +87,11 @@ func (r *TransferRepo) SetCursor(ctx context.Context, name string, id int64) err
 	return err
 }
 
-// FindByTimeoutAndChannel returns the transfer id matching the given timeout_timestamp
-// and src_channel_id with status < failed. Used to match done/failed items back to
-// the original transfer when the Voyager item id differs.
-func (r *TransferRepo) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
+func (r *Store) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE timeout_timestamp=$1 AND src_channel_id=$2 AND status < $3 LIMIT 1`,
-		timeoutTimestamp, srcChannelID, int(model.StatusFailed),
+		timeoutTimestamp, srcChannelID, int(StatusFailed),
 	).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return 0, nil
@@ -103,16 +99,14 @@ func (r *TransferRepo) FindByTimeoutAndChannel(ctx context.Context, timeoutTimes
 	return id, err
 }
 
-// FindAncestor returns the first id from the given list that exists in transfers
-// with status < failed. Used to trace a failed Voyager op back to its origin transfer.
-func (r *TransferRepo) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
+func (r *Store) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE id = ANY($1) AND status < $2 LIMIT 1`,
-		ids, int(model.StatusFailed),
+		ids, int(StatusFailed),
 	).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return 0, nil
@@ -120,10 +114,9 @@ func (r *TransferRepo) FindAncestor(ctx context.Context, ids []int64) (int64, er
 	return id, err
 }
 
-// GetDetectedIDs returns IDs of transfers currently in status=detected.
-func (r *TransferRepo) GetDetectedIDs(ctx context.Context) ([]int64, error) {
+func (r *Store) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id FROM transfers WHERE status=$1`, int(model.StatusDetected),
+		`SELECT id FROM transfers WHERE status=$1`, int(StatusDetected),
 	)
 	if err != nil {
 		return nil, err
@@ -149,11 +142,10 @@ type InFlightTransfer struct {
 	CreatedAt        time.Time
 }
 
-// GetInFlight returns all transfers with status < done.
-func (r *TransferRepo) GetInFlight(ctx context.Context) ([]InFlightTransfer, error) {
+func (r *Store) GetInFlight(ctx context.Context) ([]InFlightTransfer, error) {
 	rows, err := r.db.Query(ctx,
 		`SELECT id, timeout_timestamp, src_channel_id, created_at FROM transfers WHERE status < $1`,
-		int(model.StatusDone),
+		int(StatusDone),
 	)
 	if err != nil {
 		return nil, err
@@ -174,13 +166,13 @@ func (r *TransferRepo) GetInFlight(ctx context.Context) ([]InFlightTransfer, err
 // ── read ──────────────────────────────────────────────────────────────────────
 
 type ListFilter struct {
-	Address string // optional: matches from_address OR to_address
-	Order   string // "asc" or "desc" by created_at (default "desc")
+	Address string
+	Order   string
 	Limit   int
 	Offset  int
 }
 
-func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfer, error) {
+func (r *Store) List(ctx context.Context, f ListFilter) ([]*Transfer, error) {
 	base := `SELECT id, packet_hash,
                      src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                      from_address, to_address, base_token, base_amount, quote_token, quote_amount,
@@ -209,7 +201,7 @@ func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfe
 	}
 	defer rows.Close()
 
-	var transfers []*model.Transfer
+	var transfers []*Transfer
 	for rows.Next() {
 		t, err := scanTransfer(rows)
 		if err != nil {
@@ -220,7 +212,7 @@ func (r *TransferRepo) List(ctx context.Context, f ListFilter) ([]*model.Transfe
 	return transfers, rows.Err()
 }
 
-func (r *TransferRepo) GetByPacketHash(ctx context.Context, packetHash string) (*model.Transfer, error) {
+func (r *Store) GetByPacketHash(ctx context.Context, packetHash string) (*Transfer, error) {
 	row := r.db.QueryRow(ctx,
 		`SELECT id, packet_hash,
                 src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
@@ -232,7 +224,7 @@ func (r *TransferRepo) GetByPacketHash(ctx context.Context, packetHash string) (
 	return scanTransfer(row)
 }
 
-func (r *TransferRepo) Count(ctx context.Context) (int64, error) {
+func (r *Store) Count(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transfers`).Scan(&count)
 	return count, err
@@ -244,8 +236,8 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanTransfer(row scanner) (*model.Transfer, error) {
-	t := &model.Transfer{}
+func scanTransfer(row scanner) (*Transfer, error) {
+	t := &Transfer{}
 	var status int
 	err := row.Scan(
 		&t.ID, &t.PacketHash,
@@ -256,10 +248,10 @@ func scanTransfer(row scanner) (*model.Transfer, error) {
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("repository: transfer not found")
+			return nil, fmt.Errorf("transfer not found")
 		}
 		return nil, err
 	}
-	t.Status = model.TransferStatus(status)
+	t.Status = TransferStatus(status)
 	return t, nil
 }
