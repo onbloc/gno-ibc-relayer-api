@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -168,7 +169,7 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 	case "packet_send":
 		return parsePacketSend(id, body.Plugin, chainEvent, chains, createdAt)
 	case "packet_recv":
-		return parsePacketRecv(id, chainEvent, chains, createdAt)
+		return parsePacketRecv(id, body.Plugin, chainEvent, chains, createdAt)
 	default:
 		return nil, nil
 	}
@@ -194,12 +195,12 @@ func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, chains 
 		return nil, nil
 	}
 
-	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, createdAt)
+	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
 }
 
 // parsePacketRecv handles eth→gno direction: packet_recv on the destination chain.
 // The source chain is identified by source_channel_id in the event (e.g. 28 → eth).
-func parsePacketRecv(id int64, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*model.Transfer, error) {
+func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*model.Transfer, error) {
 	var ev packetSendValue
 	if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
 		return nil, fmt.Errorf("parser: decode packet_recv: %w", err)
@@ -210,10 +211,10 @@ func parsePacketRecv(id int64, chainEvent chainEventBody, chains []config.Channe
 		return nil, nil
 	}
 
-	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, createdAt)
+	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
 }
 
-func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, createdAt time.Time) (*model.Transfer, error) {
+func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, isGno bool, createdAt time.Time) (*model.Transfer, error) {
 	height, _ := strconv.ParseInt(chainEvent.Height, 10, 64)
 
 	t := &model.Transfer{
@@ -224,7 +225,7 @@ func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcC
 		SrcChannelID:     ev.SourceChannelID,
 		DstChannelID:     ev.DestinationChannelID,
 		Height:           height,
-		TxHash:           chainEvent.TxHash,
+		TxHash:           formatTxHash(chainEvent.TxHash, isGno),
 		TimeoutTimestamp: ev.TimeoutTimestamp,
 		Status:           model.StatusDetected,
 		CreatedAt:        createdAt,
@@ -276,6 +277,27 @@ func chainFromPlugin(plugin string) string {
 		return ""
 	}
 	return plugin[idx+1:]
+}
+
+// isGnoPlugin reports whether the plugin originates from a Gno chain.
+// "voyager-event-source-plugin-gno/dev" → true
+// "voyager-event-source-plugin-evm/11155111" → false
+func isGnoPlugin(plugin string) bool {
+	return strings.Contains(plugin, "-gno/")
+}
+
+// formatTxHash converts a hex tx hash to the appropriate encoding.
+// Gno transactions are stored as base64; EVM transactions remain as hex.
+func formatTxHash(txHash string, isGno bool) string {
+	if txHash == "" || !isGno {
+		return txHash
+	}
+	raw := strings.TrimPrefix(txHash, "0x")
+	b, err := hex.DecodeString(raw)
+	if err != nil {
+		return txHash
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // findDstChain looks up the destination chain for a given source chain + channel.
