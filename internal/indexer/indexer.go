@@ -185,13 +185,21 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 		}
 
 		fields := ParseItemFields(item)
-		if fields == nil || fields.EventType != "packet_recv" {
+		if fields == nil {
 			continue
 		}
 
-		transferID, err := idx.repo.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
+		var transferID int64
+		switch fields.EventType {
+		case "packet_recv":
+			transferID, err = idx.repo.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
+		case "write_ack":
+			transferID, err = idx.repo.FindByPacketHash(ctx, fields.PacketHash)
+		default:
+			continue
+		}
 		if err != nil {
-			log.Printf("indexer: done find transfer timeout=%d ch=%d: %v", fields.TimeoutTimestamp, fields.SrcChannelID, err)
+			log.Printf("indexer: done find transfer (%s): %v", fields.EventType, err)
 			continue
 		}
 		if transferID == 0 {
@@ -200,7 +208,7 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 		if err := idx.repo.MarkDone(ctx, transferID, createdAt); err != nil {
 			log.Printf("indexer: done mark id=%d: %v", transferID, err)
 		} else {
-			log.Printf("indexer: done transfer id=%d via packet_recv notify", transferID)
+			log.Printf("indexer: done transfer id=%d via %s notify", transferID, fields.EventType)
 		}
 	}
 }
@@ -383,7 +391,7 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 
 	rows, err := idx.relayerDB.Query(ctx,
 		`SELECT item, created_at FROM done
-		 WHERE item::text LIKE '%packet_recv%'
+		 WHERE (item::text LIKE '%packet_recv%' OR item::text LIKE '%write_ack%')
 		 AND created_at >= $1`,
 		oldest.Add(-time.Minute),
 	)
@@ -399,17 +407,32 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 			return err
 		}
 		fields := ParseItemFields(item)
-		if fields == nil || fields.EventType != "packet_recv" {
+		if fields == nil {
 			continue
 		}
-		t, ok := timeoutMap[fields.TimeoutTimestamp]
-		if !ok {
+
+		var transferID int64
+		switch fields.EventType {
+		case "packet_recv":
+			t, ok := timeoutMap[fields.TimeoutTimestamp]
+			if !ok {
+				continue
+			}
+			transferID = t.ID
+		case "write_ack":
+			id, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
+			if err != nil || id == 0 {
+				continue
+			}
+			transferID = id
+		default:
 			continue
 		}
-		if err := idx.repo.MarkDone(ctx, t.ID, createdAt); err != nil {
-			log.Printf("indexer: startup mark done id=%d: %v", t.ID, err)
+
+		if err := idx.repo.MarkDone(ctx, transferID, createdAt); err != nil {
+			log.Printf("indexer: startup mark done id=%d: %v", transferID, err)
 		} else {
-			log.Printf("indexer: startup caught done id=%d", t.ID)
+			log.Printf("indexer: startup caught done id=%d via %s", transferID, fields.EventType)
 		}
 	}
 	return rows.Err()

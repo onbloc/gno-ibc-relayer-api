@@ -336,6 +336,45 @@ func buildPromiseItem(eventType string, timeoutTS int64, srcChannelID int) []byt
 	return b
 }
 
+// buildWriteAckItem constructs a raw done item JSON for a write_ack event,
+// which is how voyager records completion on direct (non-union) gno<->evm routes.
+func buildWriteAckItem(plugin, packetHash string, channelID int) []byte {
+	ack := writeAckValue{
+		ChannelID:  channelID,
+		PacketHash: packetHash,
+	}
+	ackBytes, _ := json.Marshal(ack)
+
+	chainEvent := map[string]any{
+		"event": map[string]any{
+			"@type":  "write_ack",
+			"@value": json.RawMessage(ackBytes),
+		},
+		"height":  "100",
+		"tx_hash": "0xdeadbeef",
+	}
+	chainEventBytes, _ := json.Marshal(chainEvent)
+
+	pluginBody := map[string]any{
+		"plugin": plugin,
+		"message": map[string]any{
+			"@type":  "make_full_event",
+			"@value": json.RawMessage(chainEventBytes),
+		},
+	}
+	pluginBodyBytes, _ := json.Marshal(pluginBody)
+
+	item := map[string]any{
+		"@type": "call",
+		"@value": map[string]any{
+			"@type":  "plugin",
+			"@value": json.RawMessage(pluginBodyBytes),
+		},
+	}
+	b, _ := json.Marshal(item)
+	return b
+}
+
 func TestParseItemFields(t *testing.T) {
 	t.Run("nil on invalid JSON", func(t *testing.T) {
 		if got := ParseItemFields([]byte("notjson")); got != nil {
@@ -362,6 +401,22 @@ func TestParseItemFields(t *testing.T) {
 		}
 		if got.TimeoutTimestamp != 9999999 {
 			t.Errorf("TimeoutTimestamp = %d, want 9999999", got.TimeoutTimestamp)
+		}
+		if got.PacketHash != "testhash" {
+			t.Errorf("PacketHash = %q, want testhash", got.PacketHash)
+		}
+	})
+	t.Run("call type write_ack returns fields with packet hash", func(t *testing.T) {
+		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", 33)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.EventType != "write_ack" {
+			t.Errorf("EventType = %q, want write_ack", got.EventType)
+		}
+		if got.PacketHash != "0xabc123" {
+			t.Errorf("PacketHash = %q, want 0xabc123", got.PacketHash)
 		}
 	})
 	t.Run("call type packet_recv returns fields", func(t *testing.T) {
