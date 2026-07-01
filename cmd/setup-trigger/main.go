@@ -32,7 +32,7 @@ var triggers = []triggerDef{
 		tgName:  "done_insert_trigger",
 		table:   "done",
 		channel: "done_insert",
-		filter:  "NEW.item::text LIKE '%packet_recv%'",
+		filter:  "NEW.item::text LIKE '%packet_recv%' OR NEW.item::text LIKE '%write_ack%'",
 	},
 	{
 		fnName:  "notify_failed_insert",

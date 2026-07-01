@@ -99,6 +99,18 @@ func (r *Store) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp in
 	return id, err
 }
 
+func (r *Store) FindByPacketHash(ctx context.Context, packetHash string) (int64, error) {
+	var id int64
+	err := r.db.QueryRow(ctx,
+		`SELECT id FROM transfers WHERE packet_hash=$1 AND status < $2 LIMIT 1`,
+		packetHash, int(StatusFailed),
+	).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
 func (r *Store) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil

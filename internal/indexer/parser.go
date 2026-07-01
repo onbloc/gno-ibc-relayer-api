@@ -42,6 +42,13 @@ type packetSendValue struct {
 	TimeoutTimestamp        int64  `json:"timeout_timestamp"`
 }
 
+// writeAckValue is the destination-chain ack event for a direct (non-union)
+// gno<->evm route. Voyager records completion this way instead of packet_recv.
+type writeAckValue struct {
+	ChannelID  int    `json:"channel_id"`
+	PacketHash string `json:"packet_hash"`
+}
+
 // ── public API ────────────────────────────────────────────────────────────────
 
 // ItemFields holds key fields extracted from a Voyager item for matching transfers.
@@ -49,10 +56,12 @@ type ItemFields struct {
 	EventType        string
 	TimeoutTimestamp int64
 	SrcChannelID     int
+	PacketHash       string
 }
 
 // ParseItemFields extracts matching fields from:
-//   - make_chain_event items (call type) — used in done table
+//   - make_chain_event items (call type) — packet_send/packet_recv, used in done table
+//   - make_full_event items (call type) — write_ack, used in done table for direct gno<->evm routes
 //   - promise items with batches — used in failed table
 //
 // Returns nil for irrelevant item types.
@@ -69,7 +78,26 @@ func ParseItemFields(raw []byte) *ItemFields {
 			return nil
 		}
 		var body pluginBody
-		if err := json.Unmarshal(callVal.Value, &body); err != nil || body.Message.Type != "make_chain_event" {
+		if err := json.Unmarshal(callVal.Value, &body); err != nil {
+			return nil
+		}
+
+		if body.Message.Type == "make_full_event" {
+			var chainEvent chainEventBody
+			if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil || chainEvent.Event.Type != "write_ack" {
+				return nil
+			}
+			var ack writeAckValue
+			if err := json.Unmarshal(chainEvent.Event.Value, &ack); err != nil {
+				return nil
+			}
+			return &ItemFields{
+				EventType:  chainEvent.Event.Type,
+				PacketHash: ack.PacketHash,
+			}
+		}
+
+		if body.Message.Type != "make_chain_event" {
 			return nil
 		}
 		var chainEvent chainEventBody
@@ -87,6 +115,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 			EventType:        chainEvent.Event.Type,
 			TimeoutTimestamp: ev.TimeoutTimestamp,
 			SrcChannelID:     ev.SourceChannelID,
+			PacketHash:       ev.PacketHash,
 		}
 
 	case "promise":
