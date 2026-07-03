@@ -201,8 +201,8 @@ func TestParse_MakeFullEvent_EvmOrigin(t *testing.T) {
 	if transfer.Height != 12345 {
 		t.Errorf("Height = %d, want 12345 (from block_number)", transfer.Height)
 	}
-	if transfer.TxHash != "0xabc" {
-		t.Errorf("TxHash = %q, want 0xabc (evm hex, unchanged)", transfer.TxHash)
+	if transfer.TxOut != "0xabc" {
+		t.Errorf("TxOut = %q, want 0xabc (evm hex, unchanged)", transfer.TxOut)
 	}
 }
 
