@@ -146,17 +146,11 @@ func (r *Store) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 	return ids, rows.Err()
 }
 
-// InFlightTransfer holds fields needed to match in-flight transfers against done/failed.
-type InFlightTransfer struct {
-	ID               int64
-	TimeoutTimestamp int64
-	SrcChannelID     int
-	CreatedAt        time.Time
-}
-
-func (r *Store) GetInFlight(ctx context.Context) ([]InFlightTransfer, error) {
+// GetInFlightCreatedAt returns the created_at of every transfer not yet done,
+// used to bound how far back a done-table catch-up scan needs to look.
+func (r *Store) GetInFlightCreatedAt(ctx context.Context) ([]time.Time, error) {
 	rows, err := r.db.Query(ctx,
-		`SELECT id, timeout_timestamp, src_channel_id, created_at FROM transfers WHERE status < $1`,
+		`SELECT created_at FROM transfers WHERE status < $1`,
 		int(StatusDone),
 	)
 	if err != nil {
@@ -164,10 +158,10 @@ func (r *Store) GetInFlight(ctx context.Context) ([]InFlightTransfer, error) {
 	}
 	defer rows.Close()
 
-	var result []InFlightTransfer
+	var result []time.Time
 	for rows.Next() {
-		var t InFlightTransfer
-		if err := rows.Scan(&t.ID, &t.TimeoutTimestamp, &t.SrcChannelID, &t.CreatedAt); err != nil {
+		var t time.Time
+		if err := rows.Scan(&t); err != nil {
 			return nil, err
 		}
 		result = append(result, t)

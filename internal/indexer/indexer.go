@@ -189,15 +189,10 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 			continue
 		}
 
-		var transferID int64
-		switch fields.EventType {
-		case "packet_recv":
-			transferID, err = idx.repo.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
-		case "write_ack":
-			transferID, err = idx.repo.FindByPacketHash(ctx, fields.PacketHash)
-		default:
+		if fields.EventType != "packet_recv" && fields.EventType != "write_ack" {
 			continue
 		}
+		transferID, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
 		if err != nil {
 			log.Printf("indexer: done find transfer (%s): %v", fields.EventType, err)
 			continue
@@ -375,17 +370,15 @@ func (idx *Indexer) syncProcessing(ctx context.Context) error {
 }
 
 func (idx *Indexer) syncDone(ctx context.Context) error {
-	inFlight, err := idx.repo.GetInFlight(ctx)
-	if err != nil || len(inFlight) == 0 {
+	createdAts, err := idx.repo.GetInFlightCreatedAt(ctx)
+	if err != nil || len(createdAts) == 0 {
 		return err
 	}
 
-	timeoutMap := make(map[int64]db.InFlightTransfer, len(inFlight))
 	var oldest time.Time
-	for _, t := range inFlight {
-		timeoutMap[t.TimeoutTimestamp] = t
-		if oldest.IsZero() || t.CreatedAt.Before(oldest) {
-			oldest = t.CreatedAt
+	for _, t := range createdAts {
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest = t
 		}
 	}
 
@@ -407,25 +400,12 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 			return err
 		}
 		fields := ParseItemFields(item)
-		if fields == nil {
+		if fields == nil || (fields.EventType != "packet_recv" && fields.EventType != "write_ack") {
 			continue
 		}
 
-		var transferID int64
-		switch fields.EventType {
-		case "packet_recv":
-			t, ok := timeoutMap[fields.TimeoutTimestamp]
-			if !ok {
-				continue
-			}
-			transferID = t.ID
-		case "write_ack":
-			id, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
-			if err != nil || id == 0 {
-				continue
-			}
-			transferID = id
-		default:
+		transferID, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
+		if err != nil || transferID == 0 {
 			continue
 		}
 

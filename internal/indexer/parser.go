@@ -60,8 +60,8 @@ type ItemFields struct {
 }
 
 // ParseItemFields extracts matching fields from:
-//   - make_chain_event items (call type) — packet_send/packet_recv, used in done table
-//   - make_full_event items (call type) — write_ack, used in done table for direct gno<->evm routes
+//   - make_chain_event items (call type) — packet_send/packet_recv/write_ack (gno-origin ack), used in done table
+//   - make_full_event items (call type) — write_ack (evm-origin ack), used in done table
 //   - promise items with batches — used in failed table
 //
 // Returns nil for irrelevant item types.
@@ -104,7 +104,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 		if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
 			return nil
 		}
-		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" {
+		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" && chainEvent.Event.Type != "write_ack" {
 			return nil
 		}
 		var ev packetSendValue

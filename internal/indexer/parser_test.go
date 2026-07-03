@@ -419,6 +419,19 @@ func TestParseItemFields(t *testing.T) {
 			t.Errorf("PacketHash = %q, want 0xabc123", got.PacketHash)
 		}
 	})
+	t.Run("call type write_ack via make_chain_event (gno) returns fields", func(t *testing.T) {
+		raw := buildQueueItem("voyager-event-source-plugin-gno/dev", "write_ack", "deadbeef", 1, 33)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.EventType != "write_ack" {
+			t.Errorf("EventType = %q, want write_ack", got.EventType)
+		}
+		if got.PacketHash != "testhash" {
+			t.Errorf("PacketHash = %q, want testhash", got.PacketHash)
+		}
+	})
 	t.Run("call type packet_recv returns fields", func(t *testing.T) {
 		raw := buildQueueItem("voyager-event-source-plugin-evm/11155111", "packet_recv", "deadbeef", 28, 2)
 		got := ParseItemFields(raw)
