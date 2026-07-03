@@ -200,10 +200,17 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 		if transferID == 0 {
 			continue
 		}
-		if err := idx.repo.MarkDone(ctx, transferID, createdAt); err != nil {
-			log.Printf("indexer: done mark id=%d: %v", transferID, err)
-		} else {
-			log.Printf("indexer: done transfer id=%d via %s notify", transferID, fields.EventType)
+		switch fields.EventType {
+		case "packet_recv":
+			if err := idx.repo.SetTxIn(ctx, fields.PacketHash, fields.TxHash); err != nil {
+				log.Printf("indexer: set tx_in id=%d: %v", transferID, err)
+			}
+		case "write_ack":
+			if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
+				log.Printf("indexer: done mark id=%d: %v", transferID, err)
+			} else {
+				log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
+			}
 		}
 	}
 }
@@ -409,10 +416,17 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 			continue
 		}
 
-		if err := idx.repo.MarkDone(ctx, transferID, createdAt); err != nil {
-			log.Printf("indexer: startup mark done id=%d: %v", transferID, err)
-		} else {
-			log.Printf("indexer: startup caught done id=%d via %s", transferID, fields.EventType)
+		switch fields.EventType {
+		case "packet_recv":
+			if err := idx.repo.SetTxIn(ctx, fields.PacketHash, fields.TxHash); err != nil {
+				log.Printf("indexer: startup set tx_in id=%d: %v", transferID, err)
+			}
+		case "write_ack":
+			if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
+				log.Printf("indexer: startup mark done id=%d: %v", transferID, err)
+			} else {
+				log.Printf("indexer: startup caught done id=%d via write_ack", transferID)
+			}
 		}
 	}
 	return rows.Err()

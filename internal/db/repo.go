@@ -24,7 +24,7 @@ INSERT INTO transfers (
     id, packet_hash,
     src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
     from_address, to_address, base_token, base_amount, quote_token, quote_amount,
-    height, tx_hash, timeout_timestamp,
+    height, tx_out, timeout_timestamp,
     status, created_at
 ) VALUES (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
@@ -35,7 +35,7 @@ func (r *Store) Insert(ctx context.Context, t *Transfer) error {
 		t.ID, t.PacketHash,
 		t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
 		t.FromAddress, t.ToAddress, t.BaseToken, t.BaseAmount, t.QuoteToken, t.QuoteAmount,
-		t.Height, t.TxHash, t.TimeoutTimestamp,
+		t.Height, t.TxOut, t.TimeoutTimestamp,
 		int(t.Status), t.CreatedAt,
 	)
 	return err
@@ -49,10 +49,22 @@ func (r *Store) MarkProcessing(ctx context.Context, ids []int64) error {
 	return err
 }
 
-func (r *Store) MarkDone(ctx context.Context, id int64, doneAt time.Time) error {
+// MarkDone marks the transfer complete. txIn is a fallback tx_in value used only
+// if SetTxIn (from the packet_recv event) hasn't already populated it.
+func (r *Store) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) error {
 	_, err := r.db.Exec(ctx,
-		`UPDATE transfers SET status=$1, done_at=$2 WHERE id=$3 AND status < $1`,
-		int(StatusDone), doneAt, id,
+		`UPDATE transfers SET status=$1, done_at=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
+		int(StatusDone), doneAt, txIn, id,
+	)
+	return err
+}
+
+// SetTxIn records the destination-chain receive transaction hash, matched by packet_hash.
+// Does not overwrite an existing value.
+func (r *Store) SetTxIn(ctx context.Context, packetHash, txIn string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE transfers SET tx_in=$1 WHERE packet_hash=$2 AND tx_in IS NULL`,
+		txIn, packetHash,
 	)
 	return err
 }
@@ -182,8 +194,8 @@ func (r *Store) List(ctx context.Context, f ListFilter) ([]*Transfer, error) {
 	base := `SELECT id, packet_hash,
                      src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                      from_address, to_address, base_token, base_amount, quote_token, quote_amount,
-                     height, tx_hash, timeout_timestamp,
-                     status, created_at, done_at, err_msg
+                     height, timeout_timestamp,
+                     status, created_at, done_at, err_msg, tx_out, tx_in
               FROM transfers`
 
 	order := "DESC"
@@ -223,8 +235,8 @@ func (r *Store) GetByPacketHash(ctx context.Context, packetHash string) (*Transf
 		`SELECT id, packet_hash,
                 src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                 from_address, to_address, base_token, base_amount, quote_token, quote_amount,
-                height, tx_hash, timeout_timestamp,
-                status, created_at, done_at, err_msg
+                height, timeout_timestamp,
+                status, created_at, done_at, err_msg, tx_out, tx_in
          FROM transfers WHERE packet_hash=$1`, packetHash,
 	)
 	return scanTransfer(row)
@@ -249,8 +261,8 @@ func scanTransfer(row scanner) (*Transfer, error) {
 		&t.ID, &t.PacketHash,
 		&t.SrcChainID, &t.DstChainID, &t.SrcChannelID, &t.DstChannelID,
 		&t.FromAddress, &t.ToAddress, &t.BaseToken, &t.BaseAmount, &t.QuoteToken, &t.QuoteAmount,
-		&t.Height, &t.TxHash, &t.TimeoutTimestamp,
-		&status, &t.CreatedAt, &t.DoneAt, &t.ErrMsg,
+		&t.Height, &t.TimeoutTimestamp,
+		&status, &t.CreatedAt, &t.DoneAt, &t.ErrMsg, &t.TxOut, &t.TxIn,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {

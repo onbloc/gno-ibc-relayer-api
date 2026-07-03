@@ -174,8 +174,8 @@ func main() {
 				src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
 				from_address, to_address,
 				base_token, base_amount, quote_token, quote_amount,
-				height, tx_hash, timeout_timestamp,
-				status, created_at, done_at, err_msg
+				height, timeout_timestamp,
+				status, created_at, done_at, err_msg, tx_out
 			) VALUES (
 				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
 			) ON CONFLICT (id) DO NOTHING`,
@@ -183,8 +183,8 @@ func main() {
 			srcChain, dstChain, srcChannel, dstChannel,
 			fromAddr, toAddr,
 			baseToken, amount, quoteToken, amount,
-			height, txHash, timeout,
-			status, createdAt, doneAt, errMsg,
+			height, timeout,
+			status, createdAt, doneAt, errMsg, txHash,
 		)
 		if err != nil {
 			log.Printf("seed: insert i=%d: %v", i, err)

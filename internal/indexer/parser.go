@@ -57,6 +57,7 @@ type ItemFields struct {
 	TimeoutTimestamp int64
 	SrcChannelID     int
 	PacketHash       string
+	TxHash           string
 }
 
 // ParseItemFields extracts matching fields from:
@@ -82,6 +83,8 @@ func ParseItemFields(raw []byte) *ItemFields {
 			return nil
 		}
 
+		isGno := isGnoPlugin(body.Plugin)
+
 		if body.Message.Type == "make_full_event" {
 			var chainEvent chainEventBody
 			if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil || chainEvent.Event.Type != "write_ack" {
@@ -94,6 +97,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 			return &ItemFields{
 				EventType:  chainEvent.Event.Type,
 				PacketHash: ack.PacketHash,
+				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
 			}
 		}
 
@@ -116,6 +120,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 			TimeoutTimestamp: ev.TimeoutTimestamp,
 			SrcChannelID:     ev.SourceChannelID,
 			PacketHash:       ev.PacketHash,
+			TxHash:           formatTxHash(chainEvent.TxHash, isGno),
 		}
 
 	case "promise":
@@ -248,7 +253,7 @@ func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcC
 		SrcChannelID:     ev.SourceChannelID,
 		DstChannelID:     ev.DestinationChannelID,
 		Height:           height,
-		TxHash:           formatTxHash(chainEvent.TxHash, isGno),
+		TxOut:            formatTxHash(chainEvent.TxHash, isGno),
 		TimeoutTimestamp: ev.TimeoutTimestamp,
 		Status:           db.StatusDetected,
 		CreatedAt:        createdAt,

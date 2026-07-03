@@ -195,8 +195,8 @@ func TestParse_TxHashEncoding(t *testing.T) {
 			if transfer == nil {
 				t.Fatal("Parse returned nil transfer")
 			}
-			if transfer.TxHash != tc.wantTxHash {
-				t.Errorf("TxHash = %q, want %q", transfer.TxHash, tc.wantTxHash)
+			if transfer.TxOut != tc.wantTxHash {
+				t.Errorf("TxOut = %q, want %q", transfer.TxOut, tc.wantTxHash)
 			}
 		})
 	}
@@ -405,6 +405,10 @@ func TestParseItemFields(t *testing.T) {
 		if got.PacketHash != "testhash" {
 			t.Errorf("PacketHash = %q, want testhash", got.PacketHash)
 		}
+		wantB64 := base64.StdEncoding.EncodeToString([]byte{0xde, 0xad, 0xbe, 0xef})
+		if got.TxHash != wantB64 {
+			t.Errorf("TxHash = %q, want %q (gno tx hash base64-encoded)", got.TxHash, wantB64)
+		}
 	})
 	t.Run("call type write_ack returns fields with packet hash", func(t *testing.T) {
 		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", 33)
@@ -417,6 +421,9 @@ func TestParseItemFields(t *testing.T) {
 		}
 		if got.PacketHash != "0xabc123" {
 			t.Errorf("PacketHash = %q, want 0xabc123", got.PacketHash)
+		}
+		if got.TxHash != "0xdeadbeef" {
+			t.Errorf("TxHash = %q, want 0xdeadbeef (evm tx hash unchanged)", got.TxHash)
 		}
 	})
 	t.Run("call type write_ack via make_chain_event (gno) returns fields", func(t *testing.T) {
@@ -431,6 +438,10 @@ func TestParseItemFields(t *testing.T) {
 		if got.PacketHash != "testhash" {
 			t.Errorf("PacketHash = %q, want testhash", got.PacketHash)
 		}
+		wantB64 := base64.StdEncoding.EncodeToString([]byte{0xde, 0xad, 0xbe, 0xef})
+		if got.TxHash != wantB64 {
+			t.Errorf("TxHash = %q, want %q (gno tx hash base64-encoded)", got.TxHash, wantB64)
+		}
 	})
 	t.Run("call type packet_recv returns fields", func(t *testing.T) {
 		raw := buildQueueItem("voyager-event-source-plugin-evm/11155111", "packet_recv", "deadbeef", 28, 2)
@@ -440,6 +451,9 @@ func TestParseItemFields(t *testing.T) {
 		}
 		if got.EventType != "packet_recv" {
 			t.Errorf("EventType = %q, want packet_recv", got.EventType)
+		}
+		if got.TxHash != "deadbeef" {
+			t.Errorf("TxHash = %q, want deadbeef (evm tx hash unchanged)", got.TxHash)
 		}
 	})
 	t.Run("call type unknown event returns nil", func(t *testing.T) {
