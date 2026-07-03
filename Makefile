@@ -30,6 +30,8 @@ init:
 		-f migrations/001_init.sql
 	psql "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) dbname=$(DB_NAME)" \
 		-f migrations/002_add_err_msg.sql
+	psql "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) dbname=$(DB_NAME)" \
+		-f migrations/003_add_tx_in_out.sql
 	go run ./cmd/setup-trigger -config $(CONFIG)
 
 # build and start the server in the background, logs go to indexer.log
