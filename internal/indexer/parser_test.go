@@ -138,6 +138,74 @@ func buildQueueItem(plugin, eventType, txHash string, srcChannelID, dstChannelID
 	return b
 }
 
+// buildFullEventQueueItem constructs a raw queue item JSON matching the evm
+// event-source plugin's make_full_event shape, where packet fields are nested
+// under event.@value.packet instead of flat under event.@value.
+func buildFullEventQueueItem(plugin, eventType, txHash, packetHash string, srcChannelID, dstChannelID int, blockNumber int64) []byte {
+	packet := map[string]any{
+		"packet": map[string]any{
+			"source_channel_id":      srcChannelID,
+			"destination_channel_id": dstChannelID,
+			"timeout_timestamp":      9999999,
+		},
+		"channel_id":  srcChannelID,
+		"packet_hash": packetHash,
+	}
+	packetBytes, _ := json.Marshal(packet)
+
+	chainEvent := map[string]any{
+		"event": map[string]any{
+			"@type":  eventType,
+			"@value": json.RawMessage(packetBytes),
+		},
+		"tx_hash":      txHash,
+		"block_number": blockNumber,
+	}
+	chainEventBytes, _ := json.Marshal(chainEvent)
+
+	pluginBody := map[string]any{
+		"plugin": plugin,
+		"message": map[string]any{
+			"@type":  "make_full_event",
+			"@value": json.RawMessage(chainEventBytes),
+		},
+	}
+	pluginBodyBytes, _ := json.Marshal(pluginBody)
+
+	item := map[string]any{
+		"@type": "call",
+		"@value": map[string]any{
+			"@type":  "plugin",
+			"@value": json.RawMessage(pluginBodyBytes),
+		},
+	}
+	b, _ := json.Marshal(item)
+	return b
+}
+
+func TestParse_MakeFullEvent_EvmOrigin(t *testing.T) {
+	raw := buildFullEventQueueItem("voyager-event-source-plugin-evm/11155111", "packet_send", "0xabc", "0xpackethash", 28, 2, 12345)
+	transfer, err := Parse(1, raw, time.Now(), testChains)
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if transfer == nil {
+		t.Fatal("Parse returned nil transfer, expected evm-origin transfer to be created")
+	}
+	if transfer.SrcChainID != "11155111" || transfer.DstChainID != "dev" {
+		t.Errorf("chains = %s->%s, want 11155111->dev", transfer.SrcChainID, transfer.DstChainID)
+	}
+	if transfer.PacketHash != "0xpackethash" {
+		t.Errorf("PacketHash = %q, want 0xpackethash", transfer.PacketHash)
+	}
+	if transfer.Height != 12345 {
+		t.Errorf("Height = %d, want 12345 (from block_number)", transfer.Height)
+	}
+	if transfer.TxHash != "0xabc" {
+		t.Errorf("TxHash = %q, want 0xabc (evm hex, unchanged)", transfer.TxHash)
+	}
+}
+
 func TestParse_TxHashEncoding(t *testing.T) {
 	rawBytes := []byte{0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89}
 	hexHash := hex.EncodeToString(rawBytes)
