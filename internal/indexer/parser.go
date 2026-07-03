@@ -27,9 +27,10 @@ type pluginBody struct {
 }
 
 type chainEventBody struct {
-	Event  typedValue `json:"event"`
-	Height string     `json:"height"`
-	TxHash string     `json:"tx_hash"`
+	Event       typedValue `json:"event"`
+	Height      string     `json:"height"`
+	TxHash      string     `json:"tx_hash"`
+	BlockNumber int64      `json:"block_number"`
 }
 
 type packetSendValue struct {
@@ -40,6 +41,19 @@ type packetSendValue struct {
 	SourceConnectionID      int    `json:"source_connection_id"`
 	DestinationConnectionID int    `json:"destination_connection_id"`
 	TimeoutTimestamp        int64  `json:"timeout_timestamp"`
+}
+
+// fullEventPacketValue is the packet_send/packet_recv shape used by the evm
+// event-source plugin, wrapped in make_full_event instead of make_chain_event.
+// Same fields as packetSendValue, but nested under "packet" with different key names.
+type fullEventPacketValue struct {
+	Packet struct {
+		Data                 string `json:"data"`
+		SourceChannelID      int    `json:"source_channel_id"`
+		DestinationChannelID int    `json:"destination_channel_id"`
+		TimeoutTimestamp     int64  `json:"timeout_timestamp"`
+	} `json:"packet"`
+	PacketHash string `json:"packet_hash"`
 }
 
 // writeAckValue is the destination-chain ack event for a direct (non-union)
@@ -57,11 +71,12 @@ type ItemFields struct {
 	TimeoutTimestamp int64
 	SrcChannelID     int
 	PacketHash       string
+	TxHash           string
 }
 
 // ParseItemFields extracts matching fields from:
-//   - make_chain_event items (call type) — packet_send/packet_recv, used in done table
-//   - make_full_event items (call type) — write_ack, used in done table for direct gno<->evm routes
+//   - make_chain_event items (call type) — packet_send/packet_recv/write_ack (gno-origin ack), used in done table
+//   - make_full_event items (call type) — write_ack (evm-origin ack), used in done table
 //   - promise items with batches — used in failed table
 //
 // Returns nil for irrelevant item types.
@@ -82,6 +97,8 @@ func ParseItemFields(raw []byte) *ItemFields {
 			return nil
 		}
 
+		isGno := isGnoPlugin(body.Plugin)
+
 		if body.Message.Type == "make_full_event" {
 			var chainEvent chainEventBody
 			if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil || chainEvent.Event.Type != "write_ack" {
@@ -94,6 +111,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 			return &ItemFields{
 				EventType:  chainEvent.Event.Type,
 				PacketHash: ack.PacketHash,
+				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
 			}
 		}
 
@@ -104,7 +122,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 		if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
 			return nil
 		}
-		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" {
+		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" && chainEvent.Event.Type != "write_ack" {
 			return nil
 		}
 		var ev packetSendValue
@@ -116,6 +134,7 @@ func ParseItemFields(raw []byte) *ItemFields {
 			TimeoutTimestamp: ev.TimeoutTimestamp,
 			SrcChannelID:     ev.SourceChannelID,
 			PacketHash:       ev.PacketHash,
+			TxHash:           formatTxHash(chainEvent.TxHash, isGno),
 		}
 
 	case "promise":
@@ -185,34 +204,61 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 	if err := json.Unmarshal(callVal.Value, &body); err != nil {
 		return nil, nil
 	}
-	if body.Message.Type != "make_chain_event" {
-		return nil, nil
-	}
 
 	var chainEvent chainEventBody
-	if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
-		return nil, fmt.Errorf("parser: decode chain event: %w", err)
+	var ev packetSendValue
+
+	switch body.Message.Type {
+	case "make_chain_event":
+		// gno event-source plugin: packet fields are flat under event.@value.
+		if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
+			return nil, fmt.Errorf("parser: decode chain event: %w", err)
+		}
+		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" {
+			return nil, nil
+		}
+		if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
+			return nil, fmt.Errorf("parser: decode chain event value: %w", err)
+		}
+
+	case "make_full_event":
+		// evm event-source plugin: packet fields are nested under event.@value.packet.
+		if err := json.Unmarshal(body.Message.Value, &chainEvent); err != nil {
+			return nil, fmt.Errorf("parser: decode full event: %w", err)
+		}
+		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" {
+			return nil, nil
+		}
+		var full fullEventPacketValue
+		if err := json.Unmarshal(chainEvent.Event.Value, &full); err != nil {
+			return nil, fmt.Errorf("parser: decode full event value: %w", err)
+		}
+		ev = packetSendValue{
+			PacketData:           full.Packet.Data,
+			PacketHash:           full.PacketHash,
+			SourceChannelID:      full.Packet.SourceChannelID,
+			DestinationChannelID: full.Packet.DestinationChannelID,
+			TimeoutTimestamp:     full.Packet.TimeoutTimestamp,
+		}
+
+	default:
+		return nil, nil
 	}
 
 	switch chainEvent.Event.Type {
 	case "packet_send":
-		return parsePacketSend(id, body.Plugin, chainEvent, chains, createdAt)
+		return parsePacketSend(id, body.Plugin, chainEvent, ev, chains, createdAt)
 	case "packet_recv":
-		return parsePacketRecv(id, body.Plugin, chainEvent, chains, createdAt)
+		return parsePacketRecv(id, body.Plugin, chainEvent, ev, chains, createdAt)
 	default:
 		return nil, nil
 	}
 }
 
-func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
+func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
 	srcChainID := chainFromPlugin(plugin)
 	if srcChainID == "" {
 		return nil, nil
-	}
-
-	var ev packetSendValue
-	if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
-		return nil, fmt.Errorf("parser: decode packet_send: %w", err)
 	}
 
 	dstChainID := findDstChain(chains, srcChainID, ev.SourceChannelID)
@@ -223,12 +269,7 @@ func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, chains 
 	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
 }
 
-func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
-	var ev packetSendValue
-	if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
-		return nil, fmt.Errorf("parser: decode packet_recv: %w", err)
-	}
-
+func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
 	srcChainID, dstChainID := findChainsBySourceChannel(chains, ev.SourceChannelID)
 	if srcChainID == "" {
 		return nil, nil
@@ -239,6 +280,9 @@ func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, chains 
 
 func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, isGno bool, createdAt time.Time) (*db.Transfer, error) {
 	height, _ := strconv.ParseInt(chainEvent.Height, 10, 64)
+	if height == 0 {
+		height = chainEvent.BlockNumber
+	}
 
 	t := &db.Transfer{
 		ID:               id,
@@ -248,7 +292,7 @@ func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcC
 		SrcChannelID:     ev.SourceChannelID,
 		DstChannelID:     ev.DestinationChannelID,
 		Height:           height,
-		TxHash:           formatTxHash(chainEvent.TxHash, isGno),
+		TxOut:            formatTxHash(chainEvent.TxHash, isGno),
 		TimeoutTimestamp: ev.TimeoutTimestamp,
 		Status:           db.StatusDetected,
 		CreatedAt:        createdAt,

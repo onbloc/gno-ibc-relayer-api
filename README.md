@@ -9,28 +9,31 @@ The Union relayer processes cross-chain transfers through three tables (`queue`,
 **Supported chains:** gno ↔ Ethereum (union is an intermediate relay and is excluded)
 
 **Event mapping per direction:**
-- **gno→eth**: detected via `packet_send` on gno queue
-- **eth→gno**: detected via `packet_recv` on gno queue
+- **gno→eth**: detected via `packet_send` on the gno event-source plugin (`make_chain_event`)
+- **eth→gno**: detected via `packet_send` on the evm event-source plugin (`make_full_event`, packet fields nested under `event.packet`)
+
+Both directions signal completion via a `write_ack` event in the relayer's `done` table — gno emits it wrapped in `make_chain_event`, evm wraps it in `make_full_event`. A `packet_recv` event (present in both directions, though its payload shape varies) carries the destination-chain receive transaction hash but does not by itself mark the transfer done.
 
 ### Transfer status
 
-| Value | Name       | Description                                                  |
-|-------|------------|--------------------------------------------------------------|
-| `0`   | detected   | `packet_send` or `packet_recv` found in relayer queue        |
-| `1`   | processing | item removed from queue, relay in progress                   |
-| `2`   | done       | `packet_recv` confirmed on destination chain (bridge complete) |
-| `3`   | failed     | relay failed — `err_msg` contains the error from the relayer |
+| Value | Name       | Description                                                    |
+|-------|------------|------------------------------------------------------------------|
+| `0`   | detected   | `packet_send` found in relayer queue                              |
+| `1`   | processing | item removed from queue, relay in progress                        |
+| `2`   | done       | `write_ack` confirmed on destination chain (bridge complete)       |
+| `3`   | failed     | relay failed — `err_msg` contains the error from the relayer      |
 
 ### How status transitions work
 
 ```
 queue INSERT  →  NOTIFY  →  detected (0)
 queue DELETE  →  poll    →  processing (1)
-done INSERT (packet_recv)  →  NOTIFY  →  done (2)
-failed INSERT              →  NOTIFY  →  failed (3)  +  err_msg stored
+done INSERT (packet_recv)  →  NOTIFY  →  tx_in populated (status unchanged)
+done INSERT (write_ack)    →  NOTIFY  →  done (2)
+failed INSERT               →  NOTIFY  →  failed (3)  +  err_msg stored
 ```
 
-Status `2 (done)` is set when a `packet_recv` event appears in the relayer's `done` table, matched by `timeout_timestamp` — confirming the packet was received on the destination chain, not just that relay was initiated.
+Status `2 (done)` is set when a `write_ack` event appears in the relayer's `done` table, matched by `packet_hash` — confirming the packet was received *and acknowledged* on the destination chain, not just that relay was initiated. A separate `packet_recv` event (also matched by `packet_hash`) fills in `tx_in` with the destination-chain receive transaction hash; if `packet_recv` is missed or never emitted (as on evm, where receive+ack happen in the same transaction), `write_ack`'s own transaction hash is used as a fallback.
 
 ## Project Structure
 
@@ -148,13 +151,16 @@ curl http://localhost:8080/status/0xfd67a60d...
   "quote_token": "ugnot",
   "quote_amount": "1000000",
   "height": 81037,
-  "tx_hash": "0x3966e3f3...",
   "timeout_timestamp": 1779859590954000000,
   "status": 2,
   "created_at": "2026-05-26T05:28:50Z",
-  "done_at": "2026-05-26T05:29:12Z"
+  "done_at": "2026-05-26T05:29:12Z",
+  "tx_out": "0x3966e3f3...",
+  "tx_in": "0x8a12ff01..."
 }
 ```
+
+> `tx_out` is the source-chain send transaction, always present. `tx_in` is the destination-chain receive transaction — omitted from the response until a `packet_recv`/`write_ack` event fills it in.
 
 ---
 
@@ -192,11 +198,11 @@ curl "http://localhost:8080/wallet/0xf4ad3b02d44fa88371ef8faa232f789068b5f56b?or
       "quote_token": "0x7fed1d819109fb7a095137bf867abe61db36c99c",
       "quote_amount": "1000000",
       "height": 105256,
-      "tx_hash": "0xc69c3761...",
       "timeout_timestamp": 1780023916550000000,
       "status": 3,
       "created_at": "2026-05-28T03:05:23Z",
-      "err_msg": "error in voyager-client-update-plugin-state-lens/state-lens/ics23/ics23: error in state/ibc-union/union-testnet-10: client `39` not found"
+      "err_msg": "error in voyager-client-update-plugin-state-lens/state-lens/ics23/ics23: error in state/ibc-union/union-testnet-10: client `39` not found",
+      "tx_out": "0xc69c3761..."
     }
   ],
   "limit": 20,

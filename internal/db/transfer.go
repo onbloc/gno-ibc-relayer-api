@@ -27,12 +27,16 @@ type Transfer struct {
 	QuoteToken  string `json:"quote_token"`
 	QuoteAmount string `json:"quote_amount"`
 
-	Height           int64  `json:"height"`
-	TxHash           string `json:"tx_hash"`
-	TimeoutTimestamp int64  `json:"timeout_timestamp"`
+	Height           int64 `json:"height"`
+	TimeoutTimestamp int64 `json:"timeout_timestamp"`
 
 	Status    TransferStatus `json:"status"`
 	CreatedAt time.Time      `json:"created_at"`
 	DoneAt    *time.Time     `json:"done_at,omitempty"`
 	ErrMsg    *string        `json:"err_msg,omitempty"`
+
+	// TxOut is the source-chain send transaction hash.
+	// TxIn is the destination-chain receive transaction hash, set once a packet_recv/write_ack is matched.
+	TxOut string  `json:"tx_out"`
+	TxIn  *string `json:"tx_in,omitempty"`
 }
