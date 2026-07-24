@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"testing"
@@ -404,14 +405,39 @@ func buildPromiseItem(eventType string, timeoutTS int64, srcChannelID int) []byt
 	return b
 }
 
+// encodeAckHex builds a hex-encoded Ack{tag, inner_ack} payload matching the
+// abi_encode_params layout used by both the gno and evm write_ack sources.
+func encodeAckHex(tag uint64, innerAck []byte) string {
+	word := func(v uint64) []byte {
+		b := make([]byte, 32)
+		binary.BigEndian.PutUint64(b[24:], v)
+		return b
+	}
+	padTo32 := func(b []byte) []byte {
+		if rem := len(b) % 32; rem != 0 {
+			b = append(b, make([]byte, 32-rem)...)
+		}
+		return b
+	}
+
+	buf := append([]byte{}, word(tag)...)
+	buf = append(buf, word(64)...) // offset to inner_ack tail
+	buf = append(buf, word(uint64(len(innerAck)))...)
+	buf = append(buf, padTo32(append([]byte{}, innerAck...))...)
+
+	return "0x" + hex.EncodeToString(buf)
+}
+
 // buildWriteAckItem constructs a raw done item JSON for a write_ack event,
 // which is how voyager records completion on direct (non-union) gno<->evm routes.
-func buildWriteAckItem(plugin, packetHash string, channelID int) []byte {
-	ack := writeAckValue{
-		ChannelID:  channelID,
-		PacketHash: packetHash,
+// ack is the hex-encoded acknowledgement payload; pass "" to omit it.
+func buildWriteAckItem(plugin, packetHash, ack string, channelID int) []byte {
+	ackVal := writeAckValue{
+		ChannelID:       channelID,
+		PacketHash:      packetHash,
+		Acknowledgement: ack,
 	}
-	ackBytes, _ := json.Marshal(ack)
+	ackBytes, _ := json.Marshal(ackVal)
 
 	chainEvent := map[string]any{
 		"event": map[string]any{
@@ -427,6 +453,46 @@ func buildWriteAckItem(plugin, packetHash string, channelID int) []byte {
 		"plugin": plugin,
 		"message": map[string]any{
 			"@type":  "make_full_event",
+			"@value": json.RawMessage(chainEventBytes),
+		},
+	}
+	pluginBodyBytes, _ := json.Marshal(pluginBody)
+
+	item := map[string]any{
+		"@type": "call",
+		"@value": map[string]any{
+			"@type":  "plugin",
+			"@value": json.RawMessage(pluginBodyBytes),
+		},
+	}
+	b, _ := json.Marshal(item)
+	return b
+}
+
+// buildGnoWriteAckItem constructs a raw done item JSON for a write_ack event
+// as emitted by the gno event-source plugin, wrapped in make_chain_event.
+func buildGnoWriteAckItem(plugin, packetHash, ack string, channelID int) []byte {
+	ackVal := writeAckValue{
+		ChannelID:       channelID,
+		PacketHash:      packetHash,
+		Acknowledgement: ack,
+	}
+	ackBytes, _ := json.Marshal(ackVal)
+
+	chainEvent := map[string]any{
+		"event": map[string]any{
+			"@type":  "write_ack",
+			"@value": json.RawMessage(ackBytes),
+		},
+		"height":  "100",
+		"tx_hash": "deadbeef",
+	}
+	chainEventBytes, _ := json.Marshal(chainEvent)
+
+	pluginBody := map[string]any{
+		"plugin": plugin,
+		"message": map[string]any{
+			"@type":  "make_chain_event",
 			"@value": json.RawMessage(chainEventBytes),
 		},
 	}
@@ -479,7 +545,7 @@ func TestParseItemFields(t *testing.T) {
 		}
 	})
 	t.Run("call type write_ack returns fields with packet hash", func(t *testing.T) {
-		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", 33)
+		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", "", 33)
 		got := ParseItemFields(raw)
 		if got == nil {
 			t.Fatal("expected non-nil")
@@ -492,6 +558,48 @@ func TestParseItemFields(t *testing.T) {
 		}
 		if got.TxHash != "0xdeadbeef" {
 			t.Errorf("TxHash = %q, want 0xdeadbeef (evm tx hash unchanged)", got.TxHash)
+		}
+		if !got.AckSuccess {
+			t.Errorf("AckSuccess = false, want true (missing acknowledgement defaults to success)")
+		}
+	})
+	t.Run("write_ack (evm/make_full_event) with TAG_ACK_SUCCESS", func(t *testing.T) {
+		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", encodeAckHex(1, nil), 33)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if !got.AckSuccess {
+			t.Errorf("AckSuccess = false, want true")
+		}
+		if got.AckError != "" {
+			t.Errorf("AckError = %q, want empty", got.AckError)
+		}
+	})
+	t.Run("write_ack (evm/make_full_event) with TAG_ACK_FAILURE", func(t *testing.T) {
+		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", encodeAckHex(0, []byte("insufficient funds")), 33)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.AckSuccess {
+			t.Errorf("AckSuccess = true, want false")
+		}
+		if got.AckError != "insufficient funds" {
+			t.Errorf("AckError = %q, want %q", got.AckError, "insufficient funds")
+		}
+	})
+	t.Run("write_ack with malformed acknowledgement defaults to success", func(t *testing.T) {
+		raw := buildWriteAckItem("voyager-event-source-plugin-evm/11155111", "0xabc123", "0xnotvalidhex", 33)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if !got.AckSuccess {
+			t.Errorf("AckSuccess = false, want true (undecodable ack should not regress prior behavior)")
+		}
+		if got.AckError != "" {
+			t.Errorf("AckError = %q, want empty", got.AckError)
 		}
 	})
 	t.Run("call type write_ack via make_chain_event (gno) returns fields", func(t *testing.T) {
@@ -509,6 +617,25 @@ func TestParseItemFields(t *testing.T) {
 		wantB64 := base64.StdEncoding.EncodeToString([]byte{0xde, 0xad, 0xbe, 0xef})
 		if got.TxHash != wantB64 {
 			t.Errorf("TxHash = %q, want %q (gno tx hash base64-encoded)", got.TxHash, wantB64)
+		}
+		if !got.AckSuccess {
+			t.Errorf("AckSuccess = false, want true (missing acknowledgement defaults to success)")
+		}
+	})
+	t.Run("write_ack (gno/make_chain_event) with TAG_ACK_FAILURE", func(t *testing.T) {
+		raw := buildGnoWriteAckItem("voyager-event-source-plugin-gno/dev", "testhash", encodeAckHex(0, []byte("timeout")), 1)
+		got := ParseItemFields(raw)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if got.EventType != "write_ack" {
+			t.Errorf("EventType = %q, want write_ack", got.EventType)
+		}
+		if got.AckSuccess {
+			t.Errorf("AckSuccess = true, want false")
+		}
+		if got.AckError != "timeout" {
+			t.Errorf("AckError = %q, want %q", got.AckError, "timeout")
 		}
 	})
 	t.Run("call type packet_recv returns fields", func(t *testing.T) {

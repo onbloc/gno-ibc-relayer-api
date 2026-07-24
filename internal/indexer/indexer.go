@@ -206,10 +206,18 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 				log.Printf("indexer: set tx_in id=%d: %v", transferID, err)
 			}
 		case "write_ack":
-			if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
-				log.Printf("indexer: done mark id=%d: %v", transferID, err)
+			if fields.AckSuccess {
+				if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
+					log.Printf("indexer: done mark id=%d: %v", transferID, err)
+				} else {
+					log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
+				}
 			} else {
-				log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
+				if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
+					log.Printf("indexer: ack error mark failed id=%d: %v", transferID, err)
+				} else {
+					log.Printf("indexer: transfer id=%d failed via write_ack ack error notify", transferID)
+				}
 			}
 		}
 	}
@@ -292,6 +300,14 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 			log.Printf("indexer: failed transfer id=%d via promise notify", transferID)
 		}
 	}
+}
+
+// ackErrMessage formats a write_ack TAG_ACK_FAILURE's decoded inner_ack for storage in err_msg.
+func ackErrMessage(ackErr string) string {
+	if ackErr == "" {
+		return "ack error"
+	}
+	return "ack error: " + ackErr
 }
 
 func (idx *Indexer) syncQueue(ctx context.Context) error {
@@ -422,10 +438,18 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 				log.Printf("indexer: startup set tx_in id=%d: %v", transferID, err)
 			}
 		case "write_ack":
-			if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
-				log.Printf("indexer: startup mark done id=%d: %v", transferID, err)
+			if fields.AckSuccess {
+				if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
+					log.Printf("indexer: startup mark done id=%d: %v", transferID, err)
+				} else {
+					log.Printf("indexer: startup caught done id=%d via write_ack", transferID)
+				}
 			} else {
-				log.Printf("indexer: startup caught done id=%d via write_ack", transferID)
+				if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
+					log.Printf("indexer: startup mark ack error failed id=%d: %v", transferID, err)
+				} else {
+					log.Printf("indexer: startup caught ack error id=%d via write_ack", transferID)
+				}
 			}
 		}
 	}

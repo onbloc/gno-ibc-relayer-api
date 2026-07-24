@@ -67,6 +67,15 @@ var tokenOrderV2Schema = Schema{
 	},
 }
 
+// ackSchema decodes a write_ack acknowledgement: Ack{tag uint256, inner_ack bytes}.
+// tag == TAG_ACK_FAILURE (0) or TAG_ACK_SUCCESS (1) on both the gno and evm sides.
+var ackSchema = Schema{
+	Fields: []Field{
+		{Type: TypeUint256}, // tag
+		{Type: TypeBytes},   // inner_ack
+	},
+}
+
 // ── decoded types ────────────────────────────────────────────────────────────
 
 type ZkgmPacket struct {
@@ -88,6 +97,17 @@ type TokenOrder struct {
 	BaseAmount  *big.Int
 	QuoteToken  []byte
 	QuoteAmount *big.Int
+}
+
+// Ack is the decoded (tag, inner_ack) pair carried by a write_ack acknowledgement.
+type Ack struct {
+	Tag      *big.Int
+	InnerAck []byte
+}
+
+// Success reports whether the ack tag is TAG_ACK_SUCCESS (nonzero); TAG_ACK_FAILURE is zero.
+func (a *Ack) Success() bool {
+	return a.Tag != nil && a.Tag.Sign() != 0
 }
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -126,6 +146,34 @@ func DecodeZkgmPacket(hexData string) (*ZkgmPacket, error) {
 	}
 
 	return &ZkgmPacket{Salt: salt, Path: path, Instruction: *instr}, nil
+}
+
+// DecodeAck hex-decodes and ABI-decodes a write_ack acknowledgement payload.
+func DecodeAck(hexData string) (*Ack, error) {
+	data, err := fromHex(hexData)
+	if err != nil {
+		return nil, fmt.Errorf("ack: hex decode: %w", err)
+	}
+	data = padTo32(data)
+
+	vals, err := Decode(ackSchema, data)
+	if err != nil {
+		return nil, fmt.Errorf("ack: decode: %w", err)
+	}
+	if len(vals) != 2 {
+		return nil, fmt.Errorf("ack: expected 2 fields, got %d", len(vals))
+	}
+
+	tag, ok := vals[0].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("ack: tag type mismatch")
+	}
+	innerAck, ok := vals[1].([]byte)
+	if !ok {
+		return nil, fmt.Errorf("ack: inner_ack type mismatch")
+	}
+
+	return &Ack{Tag: tag, InnerAck: innerAck}, nil
 }
 
 // DecodeTokenOrder decodes the operand of a TOKEN_ORDER instruction.

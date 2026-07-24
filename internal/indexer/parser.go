@@ -58,9 +58,12 @@ type fullEventPacketValue struct {
 
 // writeAckValue is the destination-chain ack event for a direct (non-union)
 // gno<->evm route. Voyager records completion this way instead of packet_recv.
+// Acknowledgement is the ABI-encoded Ack{tag, inner_ack} payload (see
+// ethabi.DecodeAck) — tag distinguishes a successful relay from an ack error.
 type writeAckValue struct {
-	ChannelID  int    `json:"channel_id"`
-	PacketHash string `json:"packet_hash"`
+	ChannelID       int    `json:"channel_id"`
+	PacketHash      string `json:"packet_hash"`
+	Acknowledgement string `json:"acknowledgement"`
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -72,6 +75,12 @@ type ItemFields struct {
 	SrcChannelID     int
 	PacketHash       string
 	TxHash           string
+
+	// AckSuccess and AckError are only meaningful when EventType == "write_ack".
+	// AckSuccess is true unless the acknowledgement decodes to TAG_ACK_FAILURE,
+	// so an undecodable/missing acknowledgement is treated as success (prior behavior).
+	AckSuccess bool
+	AckError   string
 }
 
 // ParseItemFields extracts matching fields from:
@@ -108,10 +117,13 @@ func ParseItemFields(raw []byte) *ItemFields {
 			if err := json.Unmarshal(chainEvent.Event.Value, &ack); err != nil {
 				return nil
 			}
+			ackSuccess, ackErr := decodeAckOutcome(ack.Acknowledgement)
 			return &ItemFields{
 				EventType:  chainEvent.Event.Type,
 				PacketHash: ack.PacketHash,
 				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
+				AckSuccess: ackSuccess,
+				AckError:   ackErr,
 			}
 		}
 
@@ -125,6 +137,22 @@ func ParseItemFields(raw []byte) *ItemFields {
 		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" && chainEvent.Event.Type != "write_ack" {
 			return nil
 		}
+
+		if chainEvent.Event.Type == "write_ack" {
+			var ack writeAckValue
+			if err := json.Unmarshal(chainEvent.Event.Value, &ack); err != nil {
+				return nil
+			}
+			ackSuccess, ackErr := decodeAckOutcome(ack.Acknowledgement)
+			return &ItemFields{
+				EventType:  chainEvent.Event.Type,
+				PacketHash: ack.PacketHash,
+				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
+				AckSuccess: ackSuccess,
+				AckError:   ackErr,
+			}
+		}
+
 		var ev packetSendValue
 		if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
 			return nil
@@ -332,6 +360,24 @@ func decodePacketData(t *db.Transfer, hexData string) error {
 	t.QuoteAmount = order.QuoteAmount.String()
 
 	return nil
+}
+
+// decodeAckOutcome reports whether a write_ack's acknowledgement tag is
+// TAG_ACK_SUCCESS, along with a human-readable error when it is not.
+// An empty or undecodable acknowledgement defaults to success, preserving
+// prior behavior for sources that don't carry this field.
+func decodeAckOutcome(hexAck string) (success bool, ackErr string) {
+	if hexAck == "" {
+		return true, ""
+	}
+	ack, err := ethabi.DecodeAck(hexAck)
+	if err != nil {
+		return true, ""
+	}
+	if ack.Success() {
+		return true, ""
+	}
+	return false, renderBytes(ack.InnerAck)
 }
 
 func chainFromPlugin(plugin string) string {

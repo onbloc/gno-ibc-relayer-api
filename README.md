@@ -14,26 +14,29 @@ The Union relayer processes cross-chain transfers through three tables (`queue`,
 
 Both directions signal completion via a `write_ack` event in the relayer's `done` table — gno emits it wrapped in `make_chain_event`, evm wraps it in `make_full_event`. A `packet_recv` event (present in both directions, though its payload shape varies) carries the destination-chain receive transaction hash but does not by itself mark the transfer done.
 
+A `write_ack` event's `acknowledgement` field is the ABI-encoded UCS03-ZKGM `Ack{tag, inner_ack}` payload (identical encoding on gno and evm): `tag == TAG_ACK_SUCCESS` (non-zero) means the packet was actually processed successfully on the destination chain, while `tag == TAG_ACK_FAILURE` (zero) means the destination chain rejected the packet — a business-logic failure, not a relay failure, but still an unsuccessful transfer. The indexer decodes this tag and routes the transfer to `done` or `failed` accordingly (an acknowledgement that can't be decoded, or is missing, defaults to success). This is separate from the `failed` table, which only covers relay-level failures (e.g. timeouts).
+
 ### Transfer status
 
 | Value | Name       | Description                                                    |
 |-------|------------|------------------------------------------------------------------|
 | `0`   | detected   | `packet_send` found in relayer queue                              |
 | `1`   | processing | item removed from queue, relay in progress                        |
-| `2`   | done       | `write_ack` confirmed on destination chain (bridge complete)       |
-| `3`   | failed     | relay failed — `err_msg` contains the error from the relayer      |
+| `2`   | done       | `write_ack` confirmed on destination chain with `TAG_ACK_SUCCESS`  |
+| `3`   | failed     | relay failed, or `write_ack` confirmed with `TAG_ACK_FAILURE` — `err_msg` contains the relayer error or decoded ack error |
 
 ### How status transitions work
 
 ```
 queue INSERT  →  NOTIFY  →  detected (0)
 queue DELETE  →  poll    →  processing (1)
-done INSERT (packet_recv)  →  NOTIFY  →  tx_in populated (status unchanged)
-done INSERT (write_ack)    →  NOTIFY  →  done (2)
-failed INSERT               →  NOTIFY  →  failed (3)  +  err_msg stored
+done INSERT (packet_recv)         →  NOTIFY  →  tx_in populated (status unchanged)
+done INSERT (write_ack, success)  →  NOTIFY  →  done (2)
+done INSERT (write_ack, ack error) →  NOTIFY  →  failed (3)  +  err_msg stored
+failed INSERT                      →  NOTIFY  →  failed (3)  +  err_msg stored
 ```
 
-Status `2 (done)` is set when a `write_ack` event appears in the relayer's `done` table, matched by `packet_hash` — confirming the packet was received *and acknowledged* on the destination chain, not just that relay was initiated. A separate `packet_recv` event (also matched by `packet_hash`) fills in `tx_in` with the destination-chain receive transaction hash; if `packet_recv` is missed or never emitted (as on evm, where receive+ack happen in the same transaction), `write_ack`'s own transaction hash is used as a fallback.
+Status `2 (done)` is set when a `write_ack` event appears in the relayer's `done` table with a successful ack tag, matched by `packet_hash` — confirming the packet was received *and acknowledged* on the destination chain, not just that relay was initiated. If the ack tag instead decodes to `TAG_ACK_FAILURE`, the transfer is marked `3 (failed)` with the decoded inner ack (when printable) recorded in `err_msg`. A separate `packet_recv` event (also matched by `packet_hash`) fills in `tx_in` with the destination-chain receive transaction hash; if `packet_recv` is missed or never emitted (as on evm, where receive+ack happen in the same transaction), `write_ack`'s own transaction hash is used as a fallback.
 
 ## Project Structure
 
