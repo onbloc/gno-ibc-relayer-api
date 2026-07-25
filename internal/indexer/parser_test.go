@@ -405,6 +405,54 @@ func buildPromiseItem(eventType string, timeoutTS int64, srcChannelID int) []byt
 	return b
 }
 
+type multicallEntry struct {
+	eventType        string
+	timeoutTimestamp int64
+	srcChannelID     int
+}
+
+// buildSubmitMulticallItem constructs a raw done item JSON for a
+// submit_multicall transaction-plugin item, which bundles one or more
+// datagrams (e.g. packet_timeout) submitted in a single transaction.
+func buildSubmitMulticallItem(plugin string, entries []multicallEntry) []byte {
+	values := make([]map[string]any, len(entries))
+	for i, e := range entries {
+		values[i] = map[string]any{
+			"@type": e.eventType,
+			"@value": map[string]any{
+				"proof": "0xdeadbeef",
+				"packet": map[string]any{
+					"data":                   "0xc73010ce",
+					"timeout_height":         0,
+					"source_channel_id":      e.srcChannelID,
+					"timeout_timestamp":      e.timeoutTimestamp,
+					"destination_channel_id": 1,
+				},
+				"proof_height": 13489,
+			},
+		}
+	}
+
+	pluginBody := map[string]any{
+		"plugin": plugin,
+		"message": map[string]any{
+			"@type":  "submit_multicall",
+			"@value": values,
+		},
+	}
+	pluginBodyBytes, _ := json.Marshal(pluginBody)
+
+	item := map[string]any{
+		"@type": "call",
+		"@value": map[string]any{
+			"@type":  "plugin",
+			"@value": json.RawMessage(pluginBodyBytes),
+		},
+	}
+	b, _ := json.Marshal(item)
+	return b
+}
+
 // encodeAckHex builds a hex-encoded Ack{tag, inner_ack} payload matching the
 // abi_encode_params layout used by both the gno and evm write_ack sources.
 func encodeAckHex(tag uint64, innerAck []byte) string {
@@ -668,6 +716,70 @@ func TestParseItemFields(t *testing.T) {
 		}
 		if got.SrcChannelID != 5 {
 			t.Errorf("SrcChannelID = %d, want 5", got.SrcChannelID)
+		}
+	})
+}
+
+// ── ParsePacketTimeouts ───────────────────────────────────────────────────────
+
+func TestParsePacketTimeouts(t *testing.T) {
+	t.Run("single packet_timeout entry", func(t *testing.T) {
+		raw := buildSubmitMulticallItem("voyager-transaction-plugin-evm/11155111", []multicallEntry{
+			{eventType: "packet_timeout", timeoutTimestamp: 1784929190892000000, srcChannelID: 44},
+		})
+		got := ParsePacketTimeouts(raw)
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want 1", len(got))
+		}
+		if got[0].TimeoutTimestamp != 1784929190892000000 {
+			t.Errorf("TimeoutTimestamp = %d, want 1784929190892000000", got[0].TimeoutTimestamp)
+		}
+		if got[0].SrcChannelID != 44 {
+			t.Errorf("SrcChannelID = %d, want 44", got[0].SrcChannelID)
+		}
+	})
+
+	t.Run("multiple packet_timeout entries batched in one multicall", func(t *testing.T) {
+		raw := buildSubmitMulticallItem("voyager-transaction-plugin-evm/11155111", []multicallEntry{
+			{eventType: "packet_timeout", timeoutTimestamp: 111, srcChannelID: 1},
+			{eventType: "packet_timeout", timeoutTimestamp: 222, srcChannelID: 2},
+		})
+		got := ParsePacketTimeouts(raw)
+		if len(got) != 2 {
+			t.Fatalf("len(got) = %d, want 2", len(got))
+		}
+		if got[0].TimeoutTimestamp != 111 || got[0].SrcChannelID != 1 {
+			t.Errorf("got[0] = %+v, want {111 1}", got[0])
+		}
+		if got[1].TimeoutTimestamp != 222 || got[1].SrcChannelID != 2 {
+			t.Errorf("got[1] = %+v, want {222 2}", got[1])
+		}
+	})
+
+	t.Run("ignores non-packet_timeout entries in the multicall", func(t *testing.T) {
+		raw := buildSubmitMulticallItem("voyager-transaction-plugin-evm/11155111", []multicallEntry{
+			{eventType: "packet_recv", timeoutTimestamp: 111, srcChannelID: 1},
+			{eventType: "packet_timeout", timeoutTimestamp: 222, srcChannelID: 2},
+		})
+		got := ParsePacketTimeouts(raw)
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want 1", len(got))
+		}
+		if got[0].SrcChannelID != 2 {
+			t.Errorf("SrcChannelID = %d, want 2", got[0].SrcChannelID)
+		}
+	})
+
+	t.Run("nil for non-submit_multicall call items", func(t *testing.T) {
+		raw := buildQueueItem("voyager-event-source-plugin-evm/11155111", "packet_send", "deadbeef", 2, 28)
+		if got := ParsePacketTimeouts(raw); got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+
+	t.Run("nil on invalid JSON", func(t *testing.T) {
+		if got := ParsePacketTimeouts([]byte("notjson")); got != nil {
+			t.Errorf("expected nil, got %+v", got)
 		}
 	})
 }

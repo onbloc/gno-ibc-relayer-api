@@ -66,6 +66,23 @@ type writeAckValue struct {
 	Acknowledgement string `json:"acknowledgement"`
 }
 
+// packetTimeoutValue is a single packet_timeout datagram submitted on the
+// source chain to refund the sender after the destination chain rejected the
+// packet (e.g. panicked on recv). Has no packet_hash, so it's matched the
+// same way as failed-table promise items: by timeout_timestamp + source channel.
+type packetTimeoutValue struct {
+	Packet struct {
+		SourceChannelID  int   `json:"source_channel_id"`
+		TimeoutTimestamp int64 `json:"timeout_timestamp"`
+	} `json:"packet"`
+}
+
+// PacketTimeoutFields is a matching key for one packet_timeout datagram.
+type PacketTimeoutFields struct {
+	TimeoutTimestamp int64
+	SrcChannelID     int
+}
+
 // ── public API ────────────────────────────────────────────────────────────────
 
 // ItemFields holds key fields extracted from a Voyager item for matching transfers.
@@ -207,6 +224,47 @@ func ParseItemFields(raw []byte) *ItemFields {
 		}
 	}
 	return nil
+}
+
+// ParsePacketTimeouts extracts every packet_timeout datagram from a
+// submit_multicall item — the transaction plugin bundles the refund-triggering
+// timeoutPacket/timeout_packet calls it submits on the source chain, and a
+// single multicall transaction can batch several packets' timeouts together.
+// Returns nil for irrelevant item types.
+func ParsePacketTimeouts(raw []byte) []PacketTimeoutFields {
+	var outer typedValue
+	if err := json.Unmarshal(raw, &outer); err != nil || outer.Type != "call" {
+		return nil
+	}
+	var callVal typedValue
+	if err := json.Unmarshal(outer.Value, &callVal); err != nil || callVal.Type != "plugin" {
+		return nil
+	}
+	var body pluginBody
+	if err := json.Unmarshal(callVal.Value, &body); err != nil || body.Message.Type != "submit_multicall" {
+		return nil
+	}
+
+	var items []typedValue
+	if err := json.Unmarshal(body.Message.Value, &items); err != nil {
+		return nil
+	}
+
+	var out []PacketTimeoutFields
+	for _, item := range items {
+		if item.Type != "packet_timeout" {
+			continue
+		}
+		var pt packetTimeoutValue
+		if err := json.Unmarshal(item.Value, &pt); err != nil {
+			continue
+		}
+		out = append(out, PacketTimeoutFields{
+			TimeoutTimestamp: pt.Packet.TimeoutTimestamp,
+			SrcChannelID:     pt.Packet.SourceChannelID,
+		})
+	}
+	return out
 }
 
 // Parse converts a raw voyager item into a Transfer.

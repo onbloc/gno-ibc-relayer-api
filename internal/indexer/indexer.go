@@ -26,6 +26,12 @@ func New(relayerDB *pgxpool.Pool, repo *db.Store, cfg config.IndexerConfig, chai
 func (idx *Indexer) Run(ctx context.Context) {
 	log.Println("indexer: started")
 
+	if n, err := idx.repo.DedupeByPacketHash(ctx); err != nil {
+		log.Printf("indexer: startup dedupe: %v", err)
+	} else if n > 0 {
+		log.Printf("indexer: startup dedupe removed %d duplicate transfer(s)", n)
+	}
+
 	if err := idx.syncQueue(ctx); err != nil {
 		log.Printf("indexer: startup sync queue: %v", err)
 	}
@@ -185,41 +191,56 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 		}
 
 		fields := ParseItemFields(item)
-		if fields == nil {
-			continue
+		if fields != nil && (fields.EventType == "packet_recv" || fields.EventType == "write_ack") {
+			transferID, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
+			if err != nil {
+				log.Printf("indexer: done find transfer (%s): %v", fields.EventType, err)
+			} else if transferID != 0 {
+				switch fields.EventType {
+				case "packet_recv":
+					if err := idx.repo.SetTxIn(ctx, fields.PacketHash, fields.TxHash); err != nil {
+						log.Printf("indexer: set tx_in id=%d: %v", transferID, err)
+					}
+				case "write_ack":
+					if fields.AckSuccess {
+						if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
+							log.Printf("indexer: done mark id=%d: %v", transferID, err)
+						} else {
+							log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
+						}
+					} else {
+						if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
+							log.Printf("indexer: ack error mark failed id=%d: %v", transferID, err)
+						} else {
+							log.Printf("indexer: transfer id=%d failed via write_ack ack error notify", transferID)
+						}
+					}
+				}
+			}
 		}
 
-		if fields.EventType != "packet_recv" && fields.EventType != "write_ack" {
-			continue
+		for _, pt := range ParsePacketTimeouts(item) {
+			idx.markPacketTimeoutFailed(ctx, pt, "notify")
 		}
-		transferID, err := idx.repo.FindByPacketHash(ctx, fields.PacketHash)
-		if err != nil {
-			log.Printf("indexer: done find transfer (%s): %v", fields.EventType, err)
-			continue
-		}
-		if transferID == 0 {
-			continue
-		}
-		switch fields.EventType {
-		case "packet_recv":
-			if err := idx.repo.SetTxIn(ctx, fields.PacketHash, fields.TxHash); err != nil {
-				log.Printf("indexer: set tx_in id=%d: %v", transferID, err)
-			}
-		case "write_ack":
-			if fields.AckSuccess {
-				if err := idx.repo.MarkDone(ctx, transferID, createdAt, fields.TxHash); err != nil {
-					log.Printf("indexer: done mark id=%d: %v", transferID, err)
-				} else {
-					log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
-				}
-			} else {
-				if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
-					log.Printf("indexer: ack error mark failed id=%d: %v", transferID, err)
-				} else {
-					log.Printf("indexer: transfer id=%d failed via write_ack ack error notify", transferID)
-				}
-			}
-		}
+	}
+}
+
+// markPacketTimeoutFailed marks the transfer matching a packet_timeout datagram
+// as failed — the destination chain rejected the packet, so it was refunded on
+// the source chain instead of completing.
+func (idx *Indexer) markPacketTimeoutFailed(ctx context.Context, pt PacketTimeoutFields, via string) {
+	transferID, err := idx.repo.FindByTimeoutAndChannel(ctx, pt.TimeoutTimestamp, pt.SrcChannelID)
+	if err != nil {
+		log.Printf("indexer: packet_timeout find transfer timeout=%d ch=%d: %v", pt.TimeoutTimestamp, pt.SrcChannelID, err)
+		return
+	}
+	if transferID == 0 {
+		return
+	}
+	if err := idx.repo.MarkFailed(ctx, transferID, packetTimeoutErrMsg); err != nil {
+		log.Printf("indexer: packet_timeout mark failed id=%d: %v", transferID, err)
+	} else {
+		log.Printf("indexer: transfer id=%d failed via packet_timeout %s", transferID, via)
 	}
 }
 
@@ -301,6 +322,10 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 		}
 	}
 }
+
+// packetTimeoutErrMsg is stored in err_msg when a packet_timeout datagram
+// refunds the transfer on the source chain after the destination chain rejected it.
+const packetTimeoutErrMsg = "packet timed out; refunded on source chain"
 
 // ackErrMessage formats a write_ack TAG_ACK_FAILURE's decoded inner_ack for storage in err_msg.
 func ackErrMessage(ackErr string) string {
@@ -407,7 +432,7 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 
 	rows, err := idx.relayerDB.Query(ctx,
 		`SELECT item, created_at FROM done
-		 WHERE (item::text LIKE '%packet_recv%' OR item::text LIKE '%write_ack%')
+		 WHERE (item::text LIKE '%packet_recv%' OR item::text LIKE '%write_ack%' OR item::text LIKE '%packet_timeout%')
 		 AND created_at >= $1`,
 		oldest.Add(-time.Minute),
 	)
@@ -422,6 +447,11 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 		if err := rows.Scan(&item, &createdAt); err != nil {
 			return err
 		}
+
+		for _, pt := range ParsePacketTimeouts(item) {
+			idx.markPacketTimeoutFailed(ctx, pt, "startup catch-up")
+		}
+
 		fields := ParseItemFields(item)
 		if fields == nil || (fields.EventType != "packet_recv" && fields.EventType != "write_ack") {
 			continue

@@ -30,15 +30,86 @@ INSERT INTO transfers (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
 ) ON CONFLICT (id) DO NOTHING`
 
+// statusPriority ranks a transfer status for duplicate resolution — the
+// lowest rank wins. Done outranks failed (a completed transfer is more
+// informative than one that raced to a duplicate failure), both outrank the
+// in-flight states. Keep in sync with the CASE expression in the
+// DedupeByPacketHash query below.
+func statusPriority(status int) int {
+	switch TransferStatus(status) {
+	case StatusDone:
+		return 0
+	case StatusFailed:
+		return 1
+	case StatusProcessing:
+		return 2
+	default: // StatusDetected
+		return 3
+	}
+}
+
+// Insert adds a newly detected transfer, guarding against the relayer
+// re-emitting the same packet under a new queue/done id (e.g. re-scanning a
+// block range it already processed). If a row for this packet_hash already
+// exists, the incoming detection only advances its status when it outranks
+// the existing one (see statusPriority); same-or-lower-priority duplicates
+// are ignored rather than inserted as a second row.
 func (r *Store) Insert(ctx context.Context, t *Transfer) error {
-	_, err := r.db.Exec(ctx, sqlInsert,
-		t.ID, t.PacketHash,
-		t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
-		t.FromAddress, t.ToAddress, t.BaseToken, t.BaseAmount, t.QuoteToken, t.QuoteAmount,
-		t.Height, t.TxOut, t.TimeoutTimestamp,
-		int(t.Status), t.CreatedAt,
+	var existingID int64
+	var existingStatus int
+	err := r.db.QueryRow(ctx,
+		`SELECT id, status FROM transfers WHERE packet_hash=$1`, t.PacketHash,
+	).Scan(&existingID, &existingStatus)
+
+	switch {
+	case err == pgx.ErrNoRows:
+		_, err := r.db.Exec(ctx, sqlInsert,
+			t.ID, t.PacketHash,
+			t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
+			t.FromAddress, t.ToAddress, t.BaseToken, t.BaseAmount, t.QuoteToken, t.QuoteAmount,
+			t.Height, t.TxOut, t.TimeoutTimestamp,
+			int(t.Status), t.CreatedAt,
+		)
+		return err
+	case err != nil:
+		return err
+	case statusPriority(int(t.Status)) < statusPriority(existingStatus):
+		_, err := r.db.Exec(ctx, `UPDATE transfers SET status=$1 WHERE id=$2`, int(t.Status), existingID)
+		return err
+	default:
+		return nil
+	}
+}
+
+// DedupeByPacketHash removes duplicate transfer rows sharing a packet_hash,
+// keeping one per packet_hash: the highest-priority status wins
+// (done > failed > processing > detected, matching statusPriority above);
+// ties keep the earliest-arrived row (lowest id) and drop the rest. Run at
+// startup to clean up rows created before this dedup existed, or from a
+// relayer re-scan racing a restart.
+func (r *Store) DedupeByPacketHash(ctx context.Context) (int64, error) {
+	tag, err := r.db.Exec(ctx, `
+		WITH ranked AS (
+			SELECT id,
+			       ROW_NUMBER() OVER (
+			           PARTITION BY packet_hash
+			           ORDER BY
+			               CASE status
+			                   WHEN 2 THEN 0  -- done: highest priority
+			                   WHEN 3 THEN 1  -- failed
+			                   WHEN 1 THEN 2  -- processing
+			                   ELSE 3         -- detected: lowest priority
+			               END ASC,
+			               id ASC
+			       ) AS rn
+			FROM transfers
+		)
+		DELETE FROM transfers WHERE id IN (SELECT id FROM ranked WHERE rn > 1)`,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *Store) MarkProcessing(ctx context.Context, ids []int64) error {
