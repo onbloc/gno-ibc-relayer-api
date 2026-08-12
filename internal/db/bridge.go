@@ -67,17 +67,6 @@ func New(db *pgxpool.Pool) *BridgeDB {
 
 // ── write ─────────────────────────────────────────────────────────────────────
 
-const sqlInsert = `
-INSERT INTO transfers (
-    id, packet_hash,
-    src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
-    from_address, to_address, base_token, base_amount, quote_token, quote_amount,
-    height, tx_out, timeout_timestamp,
-    status, created_at
-) VALUES (
-    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
-) ON CONFLICT (id) DO NOTHING`
-
 // statusPriority ranks a bridge status for duplicate resolution — lowest wins (done > failed > in-flight).
 // Keep in sync with DedupeByPacketHash's CASE below.
 func statusPriority(status int) int {
@@ -105,7 +94,16 @@ func (r *BridgeDB) Insert(ctx context.Context, t *BridgeRecord) error {
 
 	switch {
 	case err == pgx.ErrNoRows:
-		_, err := r.db.Exec(ctx, sqlInsert,
+		_, err := r.db.Exec(ctx, `
+			INSERT INTO transfers (
+			    id, packet_hash,
+			    src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
+			    from_address, to_address, base_token, base_amount, quote_token, quote_amount,
+			    height, tx_out, timeout_timestamp,
+			    status, created_at
+			) VALUES (
+			    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+			) ON CONFLICT (id) DO NOTHING`,
 			t.ID, t.PacketHash,
 			t.SrcChainID, t.DstChainID, t.SrcChannelID, t.DstChannelID,
 			t.FromAddress, t.ToAddress, t.BaseToken, t.BaseAmount, t.QuoteToken, t.QuoteAmount,
