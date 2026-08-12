@@ -140,10 +140,13 @@ func (r *Store) SetTxIn(ctx context.Context, packetHash, txIn string) error {
 	return err
 }
 
-func (r *Store) MarkFailed(ctx context.Context, id int64, errMsg string) error {
+// MarkFailed marks the transfer failed. txIn is a fallback tx_in value used only
+// if SetTxIn (from the packet_recv event) hasn't already populated it. Pass ""
+// when no tx hash is available for this failure path.
+func (r *Store) MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) error {
 	_, err := r.db.Exec(ctx,
-		`UPDATE transfers SET status=$1, err_msg=$2 WHERE id=$3 AND status < $1`,
-		int(StatusFailed), errMsg, id,
+		`UPDATE transfers SET status=$1, err_msg=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
+		int(StatusFailed), errMsg, txIn, id,
 	)
 	return err
 }

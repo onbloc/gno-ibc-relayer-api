@@ -209,7 +209,7 @@ func (idx *Indexer) runDoneListener(ctx context.Context) error {
 							log.Printf("indexer: done transfer id=%d via write_ack notify", transferID)
 						}
 					} else {
-						if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
+						if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError), fields.TxHash); err != nil {
 							log.Printf("indexer: ack error mark failed id=%d: %v", transferID, err)
 						} else {
 							log.Printf("indexer: transfer id=%d failed via write_ack ack error notify", transferID)
@@ -237,7 +237,7 @@ func (idx *Indexer) markPacketTimeoutFailed(ctx context.Context, pt PacketTimeou
 	if transferID == 0 {
 		return
 	}
-	if err := idx.repo.MarkFailed(ctx, transferID, packetTimeoutErrMsg); err != nil {
+	if err := idx.repo.MarkFailed(ctx, transferID, packetTimeoutErrMsg, ""); err != nil {
 		log.Printf("indexer: packet_timeout mark failed id=%d: %v", transferID, err)
 	} else {
 		log.Printf("indexer: transfer id=%d failed via packet_timeout %s", transferID, via)
@@ -298,7 +298,7 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 			continue
 		}
 
-		if err := idx.repo.MarkFailed(ctx, id, errMsg); err == nil {
+		if err := idx.repo.MarkFailed(ctx, id, errMsg, ""); err == nil {
 			log.Printf("indexer: failed transfer id=%d (direct)", id)
 			continue
 		}
@@ -315,7 +315,7 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 		if transferID == 0 {
 			continue
 		}
-		if err := idx.repo.MarkFailed(ctx, transferID, errMsg); err != nil {
+		if err := idx.repo.MarkFailed(ctx, transferID, errMsg, fields.TxHash); err != nil {
 			log.Printf("indexer: failed mark id=%d: %v", transferID, err)
 		} else {
 			log.Printf("indexer: failed transfer id=%d via promise notify", transferID)
@@ -475,7 +475,7 @@ func (idx *Indexer) syncDone(ctx context.Context) error {
 					log.Printf("indexer: startup caught done id=%d via write_ack", transferID)
 				}
 			} else {
-				if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError)); err != nil {
+				if err := idx.repo.MarkFailed(ctx, transferID, ackErrMessage(fields.AckError), fields.TxHash); err != nil {
 					log.Printf("indexer: startup mark ack error failed id=%d: %v", transferID, err)
 				} else {
 					log.Printf("indexer: startup caught ack error id=%d via write_ack", transferID)
@@ -510,13 +510,13 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 			return err
 		}
 
-		if err := idx.repo.MarkFailed(ctx, id, errMsg); err != nil {
+		if err := idx.repo.MarkFailed(ctx, id, errMsg, ""); err != nil {
 			log.Printf("indexer: mark failed id=%d: %v", id, err)
 		} else {
 			if ancestorID, err := idx.traceFailedAncestor(ctx, parents); err != nil {
 				log.Printf("indexer: trace ancestor id=%d: %v", id, err)
 			} else if ancestorID > 0 && ancestorID != id {
-				if err := idx.repo.MarkFailed(ctx, ancestorID, errMsg); err != nil {
+				if err := idx.repo.MarkFailed(ctx, ancestorID, errMsg, ""); err != nil {
 					log.Printf("indexer: mark failed ancestor id=%d: %v", ancestorID, err)
 				} else {
 					log.Printf("indexer: marked origin transfer id=%d failed via descendant id=%d", ancestorID, id)

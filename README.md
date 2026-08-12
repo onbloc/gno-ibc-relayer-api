@@ -34,12 +34,12 @@ queue INSERT  →  NOTIFY  →  detected (0)
 queue DELETE  →  poll    →  processing (1)
 done INSERT (packet_recv)          →  NOTIFY  →  tx_in populated (status unchanged)
 done INSERT (write_ack, success)   →  NOTIFY  →  done (2)
-done INSERT (write_ack, ack error) →  NOTIFY  →  failed (3)  +  err_msg stored
+done INSERT (write_ack, ack error) →  NOTIFY  →  failed (3)  +  err_msg stored (+ tx_in fallback)
 done INSERT (packet_timeout)       →  NOTIFY  →  failed (3)  +  err_msg stored
 failed INSERT                      →  NOTIFY  →  failed (3)  +  err_msg stored
 ```
 
-Status `2 (done)` is set when a `write_ack` event appears in the relayer's `done` table with a successful ack tag, matched by `packet_hash` — confirming the packet was received *and acknowledged* on the destination chain, not just that relay was initiated. If the ack tag instead decodes to `TAG_ACK_FAILURE`, the transfer is marked `3 (failed)` with the decoded inner ack (when printable) recorded in `err_msg`. A separate `packet_recv` event (also matched by `packet_hash`) fills in `tx_in` with the destination-chain receive transaction hash; if `packet_recv` is missed or never emitted (as on evm, where receive+ack happen in the same transaction), `write_ack`'s own transaction hash is used as a fallback.
+Status `2 (done)` is set when a `write_ack` event appears in the relayer's `done` table with a successful ack tag, matched by `packet_hash` — confirming the packet was received *and acknowledged* on the destination chain, not just that relay was initiated. If the ack tag instead decodes to `TAG_ACK_FAILURE`, the transfer is marked `3 (failed)` with the decoded inner ack (when printable) recorded in `err_msg`. A separate `packet_recv` event (also matched by `packet_hash`) fills in `tx_in` with the destination-chain receive transaction hash; if `packet_recv` is missed or never emitted (as on evm, where receive+ack happen in the same transaction), the triggering event's own transaction hash is used as a fallback — this applies both when `write_ack` succeeds and when it decodes to `TAG_ACK_FAILURE`, so `tx_in` is populated consistently regardless of outcome. `packet_timeout` and relay-error `failed` rows carry no destination-chain tx hash, so they leave `tx_in` to whatever a prior `packet_recv` may have already set.
 
 A `packet_timeout` datagram (source-chain refund after a destination-chain panic) is matched by `timeout_timestamp` + `source_channel_id` instead, since it carries no `packet_hash`; a single `submit_multicall` row can bundle refunds for several packets at once, and each is matched independently.
 
