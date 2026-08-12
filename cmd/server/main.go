@@ -32,18 +32,18 @@ func main() {
 	}
 	defer relayerDB.Close()
 
-	appDB, err := db.NewPool(ctx, cfg.AppDB)
+	bridgeDBPool, err := db.NewPool(ctx, cfg.BridgeDB)
 	if err != nil {
-		log.Fatalf("app db: %v", err)
+		log.Fatalf("bridge db: %v", err)
 	}
-	defer appDB.Close()
+	defer bridgeDBPool.Close()
 
-	repo := db.New(appDB)
+	bridgeDB := db.New(bridgeDBPool)
 
-	idx := indexer.New(relayerDB, repo, cfg.Indexer, cfg.ChannelChains)
+	idx := indexer.New(relayerDB, bridgeDB, cfg.Indexer, cfg.ChannelChains)
 	go idx.Run(ctx)
 
-	srv := server.New(cfg.Server, repo)
+	srv := server.New(cfg.Server, bridgeDB)
 	log.Printf("server: listening on :%d", cfg.Server.Port)
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server: %v", err)

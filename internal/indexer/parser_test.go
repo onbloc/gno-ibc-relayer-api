@@ -186,24 +186,24 @@ func buildFullEventQueueItem(plugin, eventType, txHash, packetHash string, srcCh
 
 func TestParse_MakeFullEvent_EvmOrigin(t *testing.T) {
 	raw := buildFullEventQueueItem("voyager-event-source-plugin-evm/11155111", "packet_send", "0xabc", "0xpackethash", 28, 2, 12345)
-	transfer, err := Parse(1, raw, time.Now(), testChains)
+	bridge, err := Parse(1, raw, time.Now(), testChains)
 	if err != nil {
 		t.Fatalf("Parse error: %v", err)
 	}
-	if transfer == nil {
-		t.Fatal("Parse returned nil transfer, expected evm-origin transfer to be created")
+	if bridge == nil {
+		t.Fatal("Parse returned nil bridge, expected evm-origin bridge to be created")
 	}
-	if transfer.SrcChainID != "11155111" || transfer.DstChainID != "dev" {
-		t.Errorf("chains = %s->%s, want 11155111->dev", transfer.SrcChainID, transfer.DstChainID)
+	if bridge.SrcChainID != "11155111" || bridge.DstChainID != "dev" {
+		t.Errorf("chains = %s->%s, want 11155111->dev", bridge.SrcChainID, bridge.DstChainID)
 	}
-	if transfer.PacketHash != "0xpackethash" {
-		t.Errorf("PacketHash = %q, want 0xpackethash", transfer.PacketHash)
+	if bridge.PacketHash != "0xpackethash" {
+		t.Errorf("PacketHash = %q, want 0xpackethash", bridge.PacketHash)
 	}
-	if transfer.Height != 12345 {
-		t.Errorf("Height = %d, want 12345 (from block_number)", transfer.Height)
+	if bridge.Height != 12345 {
+		t.Errorf("Height = %d, want 12345 (from block_number)", bridge.Height)
 	}
-	if transfer.TxOut != "0xabc" {
-		t.Errorf("TxOut = %q, want 0xabc (evm hex, unchanged)", transfer.TxOut)
+	if bridge.TxOut != "0xabc" {
+		t.Errorf("TxOut = %q, want 0xabc (evm hex, unchanged)", bridge.TxOut)
 	}
 }
 
@@ -257,15 +257,15 @@ func TestParse_TxHashEncoding(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildQueueItem(tc.plugin, tc.eventType, hexHash, tc.srcChannel, tc.dstChannel)
-			transfer, err := Parse(1, raw, time.Now(), testChains)
+			bridge, err := Parse(1, raw, time.Now(), testChains)
 			if err != nil {
 				t.Fatalf("Parse error: %v", err)
 			}
-			if transfer == nil {
-				t.Fatal("Parse returned nil transfer")
+			if bridge == nil {
+				t.Fatal("Parse returned nil bridge")
 			}
-			if transfer.TxOut != tc.wantTxHash {
-				t.Errorf("TxOut = %q, want %q", transfer.TxOut, tc.wantTxHash)
+			if bridge.TxOut != tc.wantTxHash {
+				t.Errorf("TxOut = %q, want %q", bridge.TxOut, tc.wantTxHash)
 			}
 		})
 	}

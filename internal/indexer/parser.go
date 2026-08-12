@@ -85,7 +85,7 @@ type PacketTimeoutFields struct {
 
 // ── public API ────────────────────────────────────────────────────────────────
 
-// ItemFields holds key fields extracted from a Voyager item for matching transfers.
+// ItemFields holds key fields extracted from a Voyager item for matching bridges.
 type ItemFields struct {
 	EventType        string
 	TimeoutTimestamp int64
@@ -267,9 +267,9 @@ func ParsePacketTimeouts(raw []byte) []PacketTimeoutFields {
 	return out
 }
 
-// Parse converts a raw voyager item into a Transfer.
+// Parse converts a raw voyager item into a BridgeRecord.
 // Returns (nil, nil) for irrelevant events and union relay packets.
-func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.ChannelChain) (*db.Transfer, error) {
+func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.ChannelChain) (*db.BridgeRecord, error) {
 	var outer typedValue
 	if err := json.Unmarshal(rawItem, &outer); err != nil {
 		return nil, fmt.Errorf("parser: unmarshal: %w", err)
@@ -341,7 +341,7 @@ func Parse(id int64, rawItem []byte, createdAt time.Time, chains []config.Channe
 	}
 }
 
-func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
+func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.BridgeRecord, error) {
 	srcChainID := chainFromPlugin(plugin)
 	if srcChainID == "" {
 		return nil, nil
@@ -352,25 +352,25 @@ func parsePacketSend(id int64, plugin string, chainEvent chainEventBody, ev pack
 		return nil, nil
 	}
 
-	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
+	return buildBridge(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
 }
 
-func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.Transfer, error) {
+func parsePacketRecv(id int64, plugin string, chainEvent chainEventBody, ev packetSendValue, chains []config.ChannelChain, createdAt time.Time) (*db.BridgeRecord, error) {
 	srcChainID, dstChainID := findChainsBySourceChannel(chains, ev.SourceChannelID)
 	if srcChainID == "" {
 		return nil, nil
 	}
 
-	return buildTransfer(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
+	return buildBridge(id, ev, chainEvent, srcChainID, dstChainID, isGnoPlugin(plugin), createdAt)
 }
 
-func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, isGno bool, createdAt time.Time) (*db.Transfer, error) {
+func buildBridge(id int64, ev packetSendValue, chainEvent chainEventBody, srcChainID, dstChainID string, isGno bool, createdAt time.Time) (*db.BridgeRecord, error) {
 	height, _ := strconv.ParseInt(chainEvent.Height, 10, 64)
 	if height == 0 {
 		height = chainEvent.BlockNumber
 	}
 
-	t := &db.Transfer{
+	t := &db.BridgeRecord{
 		ID:               id,
 		PacketHash:       ev.PacketHash,
 		SrcChainID:       srcChainID,
@@ -393,7 +393,7 @@ func buildTransfer(id int64, ev packetSendValue, chainEvent chainEventBody, srcC
 
 // ── internal ─────────────────────────────────────────────────────────────────
 
-func decodePacketData(t *db.Transfer, hexData string) error {
+func decodePacketData(t *db.BridgeRecord, hexData string) error {
 	if hexData == "" {
 		return nil
 	}

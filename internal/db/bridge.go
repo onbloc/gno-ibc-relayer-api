@@ -9,12 +9,51 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Store struct {
+type BridgeStatus int
+
+const (
+	StatusDetected   BridgeStatus = 0
+	StatusProcessing BridgeStatus = 1
+	StatusDone       BridgeStatus = 2
+	StatusFailed     BridgeStatus = 3
+)
+
+type BridgeRecord struct {
+	ID         int64  `json:"id"`
+	PacketHash string `json:"packet_hash"`
+
+	SrcChainID   string `json:"src_chain_id"`
+	DstChainID   string `json:"dst_chain_id"`
+	SrcChannelID int    `json:"src_channel_id"`
+	DstChannelID int    `json:"dst_channel_id"`
+
+	FromAddress string `json:"from_address"`
+	ToAddress   string `json:"to_address"`
+	BaseToken   string `json:"base_token"`
+	BaseAmount  string `json:"base_amount"`
+	QuoteToken  string `json:"quote_token"`
+	QuoteAmount string `json:"quote_amount"`
+
+	Height           int64 `json:"height"`
+	TimeoutTimestamp int64 `json:"timeout_timestamp"`
+
+	Status    BridgeStatus `json:"status"`
+	CreatedAt time.Time    `json:"created_at"`
+	DoneAt    *time.Time   `json:"done_at,omitempty"`
+	ErrMsg    *string      `json:"err_msg,omitempty"`
+
+	// TxOut is the source-chain send transaction hash.
+	// TxIn is the destination-chain receive transaction hash, set once a packet_recv/write_ack is matched.
+	TxOut string  `json:"tx_out"`
+	TxIn  *string `json:"tx_in,omitempty"`
+}
+
+type BridgeDB struct {
 	db *pgxpool.Pool
 }
 
-func New(db *pgxpool.Pool) *Store {
-	return &Store{db: db}
+func New(db *pgxpool.Pool) *BridgeDB {
+	return &BridgeDB{db: db}
 }
 
 // ── write ─────────────────────────────────────────────────────────────────────
@@ -30,13 +69,10 @@ INSERT INTO transfers (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
 ) ON CONFLICT (id) DO NOTHING`
 
-// statusPriority ranks a transfer status for duplicate resolution — the
-// lowest rank wins. Done outranks failed (a completed transfer is more
-// informative than one that raced to a duplicate failure), both outrank the
-// in-flight states. Keep in sync with the CASE expression in the
-// DedupeByPacketHash query below.
+// statusPriority ranks a bridge status for duplicate resolution — lowest wins (done > failed > in-flight).
+// Keep in sync with DedupeByPacketHash's CASE below.
 func statusPriority(status int) int {
-	switch TransferStatus(status) {
+	switch BridgeStatus(status) {
 	case StatusDone:
 		return 0
 	case StatusFailed:
@@ -48,13 +84,10 @@ func statusPriority(status int) int {
 	}
 }
 
-// Insert adds a newly detected transfer, guarding against the relayer
-// re-emitting the same packet under a new queue/done id (e.g. re-scanning a
-// block range it already processed). If a row for this packet_hash already
-// exists, the incoming detection only advances its status when it outranks
-// the existing one (see statusPriority); same-or-lower-priority duplicates
-// are ignored rather than inserted as a second row.
-func (r *Store) Insert(ctx context.Context, t *Transfer) error {
+// Insert adds a newly detected bridge, but if a row for this packet_hash already exists
+// (e.g. the relayer re-emitted it under a new id), it only advances that row's status when
+// the new one outranks it (see statusPriority).
+func (r *BridgeDB) Insert(ctx context.Context, t *BridgeRecord) error {
 	var existingID int64
 	var existingStatus int
 	err := r.db.QueryRow(ctx,
@@ -81,13 +114,9 @@ func (r *Store) Insert(ctx context.Context, t *Transfer) error {
 	}
 }
 
-// DedupeByPacketHash removes duplicate transfer rows sharing a packet_hash,
-// keeping one per packet_hash: the highest-priority status wins
-// (done > failed > processing > detected, matching statusPriority above);
-// ties keep the earliest-arrived row (lowest id) and drop the rest. Run at
-// startup to clean up rows created before this dedup existed, or from a
-// relayer re-scan racing a restart.
-func (r *Store) DedupeByPacketHash(ctx context.Context) (int64, error) {
+// DedupeByPacketHash keeps one row per packet_hash — highest-priority status wins, ties keep
+// the lowest id. Run at startup to clean up pre-dedup rows or relayer re-scan races.
+func (r *BridgeDB) DedupeByPacketHash(ctx context.Context) (int64, error) {
 	tag, err := r.db.Exec(ctx, `
 		WITH ranked AS (
 			SELECT id,
@@ -112,7 +141,7 @@ func (r *Store) DedupeByPacketHash(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-func (r *Store) MarkProcessing(ctx context.Context, ids []int64) error {
+func (r *BridgeDB) MarkProcessing(ctx context.Context, ids []int64) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1 WHERE id = ANY($2) AND status=$3`,
 		int(StatusProcessing), ids, int(StatusDetected),
@@ -120,9 +149,8 @@ func (r *Store) MarkProcessing(ctx context.Context, ids []int64) error {
 	return err
 }
 
-// MarkDone marks the transfer complete. txIn is a fallback tx_in value used only
-// if SetTxIn (from the packet_recv event) hasn't already populated it.
-func (r *Store) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) error {
+// MarkDone marks the bridge complete; txIn is a fallback used only if SetTxIn hasn't already set tx_in.
+func (r *BridgeDB) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1, done_at=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
 		int(StatusDone), doneAt, txIn, id,
@@ -130,9 +158,9 @@ func (r *Store) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn s
 	return err
 }
 
-// SetTxIn records the destination-chain receive transaction hash, matched by packet_hash.
-// Does not overwrite an existing value.
-func (r *Store) SetTxIn(ctx context.Context, packetHash, txIn string) error {
+// SetTxIn records the destination-chain receive tx hash, matched by packet_hash; never
+// overwrites an existing value.
+func (r *BridgeDB) SetTxIn(ctx context.Context, packetHash, txIn string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET tx_in=$1 WHERE packet_hash=$2 AND tx_in IS NULL`,
 		txIn, packetHash,
@@ -140,10 +168,9 @@ func (r *Store) SetTxIn(ctx context.Context, packetHash, txIn string) error {
 	return err
 }
 
-// MarkFailed marks the transfer failed. txIn is a fallback tx_in value used only
-// if SetTxIn (from the packet_recv event) hasn't already populated it. Pass ""
-// when no tx hash is available for this failure path.
-func (r *Store) MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) error {
+// MarkFailed marks the bridge failed; txIn is a fallback used only if SetTxIn hasn't already
+// set tx_in (pass "" if no hash is available).
+func (r *BridgeDB) MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) error {
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1, err_msg=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
 		int(StatusFailed), errMsg, txIn, id,
@@ -153,7 +180,7 @@ func (r *Store) MarkFailed(ctx context.Context, id int64, errMsg string, txIn st
 
 // ── cursor ────────────────────────────────────────────────────────────────────
 
-func (r *Store) GetCursor(ctx context.Context, name string) (int64, error) {
+func (r *BridgeDB) GetCursor(ctx context.Context, name string) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT last_id FROM indexer_cursors WHERE name=$1`, name,
@@ -164,7 +191,7 @@ func (r *Store) GetCursor(ctx context.Context, name string) (int64, error) {
 	return id, nil
 }
 
-func (r *Store) SetCursor(ctx context.Context, name string, id int64) error {
+func (r *BridgeDB) SetCursor(ctx context.Context, name string, id int64) error {
 	_, err := r.db.Exec(ctx,
 		`INSERT INTO indexer_cursors (name, last_id) VALUES ($1,$2)
          ON CONFLICT (name) DO UPDATE SET last_id = EXCLUDED.last_id`,
@@ -173,7 +200,7 @@ func (r *Store) SetCursor(ctx context.Context, name string, id int64) error {
 	return err
 }
 
-func (r *Store) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
+func (r *BridgeDB) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE timeout_timestamp=$1 AND src_channel_id=$2 AND status < $3 LIMIT 1`,
@@ -185,7 +212,7 @@ func (r *Store) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp in
 	return id, err
 }
 
-func (r *Store) FindByPacketHash(ctx context.Context, packetHash string) (int64, error) {
+func (r *BridgeDB) FindByPacketHash(ctx context.Context, packetHash string) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE packet_hash=$1 AND status < $2 LIMIT 1`,
@@ -197,7 +224,7 @@ func (r *Store) FindByPacketHash(ctx context.Context, packetHash string) (int64,
 	return id, err
 }
 
-func (r *Store) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
+func (r *BridgeDB) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -212,7 +239,7 @@ func (r *Store) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
 	return id, err
 }
 
-func (r *Store) GetDetectedIDs(ctx context.Context) ([]int64, error) {
+func (r *BridgeDB) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 	rows, err := r.db.Query(ctx,
 		`SELECT id FROM transfers WHERE status=$1`, int(StatusDetected),
 	)
@@ -232,9 +259,9 @@ func (r *Store) GetDetectedIDs(ctx context.Context) ([]int64, error) {
 	return ids, rows.Err()
 }
 
-// GetInFlightCreatedAt returns the created_at of every transfer not yet done,
+// GetInFlightCreatedAt returns the created_at of every bridge not yet done,
 // used to bound how far back a done-table catch-up scan needs to look.
-func (r *Store) GetInFlightCreatedAt(ctx context.Context) ([]time.Time, error) {
+func (r *BridgeDB) GetInFlightCreatedAt(ctx context.Context) ([]time.Time, error) {
 	rows, err := r.db.Query(ctx,
 		`SELECT created_at FROM transfers WHERE status < $1`,
 		int(StatusDone),
@@ -264,7 +291,7 @@ type ListFilter struct {
 	Offset  int
 }
 
-func (r *Store) List(ctx context.Context, f ListFilter) ([]*Transfer, error) {
+func (r *BridgeDB) List(ctx context.Context, f ListFilter) ([]*BridgeRecord, error) {
 	base := `SELECT id, packet_hash,
                      src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
                      from_address, to_address, base_token, base_amount, quote_token, quote_amount,
@@ -293,18 +320,18 @@ func (r *Store) List(ctx context.Context, f ListFilter) ([]*Transfer, error) {
 	}
 	defer rows.Close()
 
-	var transfers []*Transfer
+	var bridges []*BridgeRecord
 	for rows.Next() {
-		t, err := scanTransfer(rows)
+		t, err := scanBridgeRecord(rows)
 		if err != nil {
 			return nil, err
 		}
-		transfers = append(transfers, t)
+		bridges = append(bridges, t)
 	}
-	return transfers, rows.Err()
+	return bridges, rows.Err()
 }
 
-func (r *Store) GetByPacketHash(ctx context.Context, packetHash string) (*Transfer, error) {
+func (r *BridgeDB) GetByPacketHash(ctx context.Context, packetHash string) (*BridgeRecord, error) {
 	row := r.db.QueryRow(ctx,
 		`SELECT id, packet_hash,
                 src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
@@ -313,10 +340,10 @@ func (r *Store) GetByPacketHash(ctx context.Context, packetHash string) (*Transf
                 status, created_at, done_at, err_msg, tx_out, tx_in
          FROM transfers WHERE packet_hash=$1`, packetHash,
 	)
-	return scanTransfer(row)
+	return scanBridgeRecord(row)
 }
 
-func (r *Store) Count(ctx context.Context) (int64, error) {
+func (r *BridgeDB) Count(ctx context.Context) (int64, error) {
 	var count int64
 	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM transfers`).Scan(&count)
 	return count, err
@@ -328,8 +355,8 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanTransfer(row scanner) (*Transfer, error) {
-	t := &Transfer{}
+func scanBridgeRecord(row scanner) (*BridgeRecord, error) {
+	t := &BridgeRecord{}
 	var status int
 	err := row.Scan(
 		&t.ID, &t.PacketHash,
@@ -340,10 +367,10 @@ func scanTransfer(row scanner) (*Transfer, error) {
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("transfer not found")
+			return nil, fmt.Errorf("bridge not found")
 		}
 		return nil, err
 	}
-	t.Status = TransferStatus(status)
+	t.Status = BridgeStatus(status)
 	return t, nil
 }

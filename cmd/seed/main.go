@@ -81,14 +81,14 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	appDB, err := db.NewPool(ctx, cfg.AppDB)
+	bridgeDB, err := db.NewPool(ctx, cfg.BridgeDB)
 	if err != nil {
-		log.Fatalf("app db: %v", err)
+		log.Fatalf("bridge db: %v", err)
 	}
-	defer appDB.Close()
+	defer bridgeDB.Close()
 
 	if *truncate {
-		if _, err := appDB.Exec(ctx, `TRUNCATE transfers RESTART IDENTITY`); err != nil {
+		if _, err := bridgeDB.Exec(ctx, `TRUNCATE transfers RESTART IDENTITY`); err != nil {
 			log.Fatalf("truncate: %v", err)
 		}
 		log.Println("seed: transfers table truncated")
@@ -168,7 +168,7 @@ func main() {
 
 		amount := randAmount()
 
-		_, err := appDB.Exec(ctx, `
+		_, err := bridgeDB.Exec(ctx, `
 			INSERT INTO transfers (
 				id, packet_hash,
 				src_chain_id, dst_chain_id, src_channel_id, dst_channel_id,
@@ -193,6 +193,6 @@ func main() {
 		inserted++
 	}
 
-	fmt.Printf("seed: inserted %d/100 transfers\n", inserted)
+	fmt.Printf("seed: inserted %d/100 bridges\n", inserted)
 	fmt.Printf("seed: %s appears in at least 20 rows\n", targetAddress)
 }

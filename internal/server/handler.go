@@ -10,22 +10,22 @@ import (
 	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
-type transferRepository interface {
-	GetByPacketHash(ctx context.Context, packetHash string) (*db.Transfer, error)
-	List(ctx context.Context, f db.ListFilter) ([]*db.Transfer, error)
+type BridgeDB interface {
+	GetByPacketHash(ctx context.Context, packetHash string) (*db.BridgeRecord, error)
+	List(ctx context.Context, f db.ListFilter) ([]*db.BridgeRecord, error)
 	Count(ctx context.Context) (int64, error)
 }
 
-type TransferHandler struct {
-	repo transferRepository
+type BridgeHandler struct {
+	repo BridgeDB
 }
 
-func NewTransferHandler(repo transferRepository) *TransferHandler {
-	return &TransferHandler{repo: repo}
+func NewBridgeHandler(repo BridgeDB) *BridgeHandler {
+	return &BridgeHandler{repo: repo}
 }
 
 // GET /status/{packet_hash}
-func (h *TransferHandler) GetByPacketHash(w http.ResponseWriter, r *http.Request) {
+func (h *BridgeHandler) GetByPacketHash(w http.ResponseWriter, r *http.Request) {
 	t, err := h.repo.GetByPacketHash(r.Context(), chi.URLParam(r, "packet_hash"))
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "not found")
@@ -35,11 +35,11 @@ func (h *TransferHandler) GetByPacketHash(w http.ResponseWriter, r *http.Request
 }
 
 // GET /wallet/{sender_address}?limit=&orderby=
-func (h *TransferHandler) ListByWallet(w http.ResponseWriter, r *http.Request) {
+func (h *BridgeHandler) ListByWallet(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := parsePagination(q)
 
-	transfers, err := h.repo.List(r.Context(), db.ListFilter{
+	bridges, err := h.repo.List(r.Context(), db.ListFilter{
 		Address: chi.URLParam(r, "sender_address"),
 		Order:   q.Get("orderby"),
 		Limit:   limit,
@@ -49,15 +49,15 @@ func (h *TransferHandler) ListByWallet(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	jsonOK(w, map[string]any{"data": transfers, "limit": limit, "offset": offset})
+	jsonOK(w, map[string]any{"data": bridges, "limit": limit, "offset": offset})
 }
 
 // GET /history?limit=&orderby=
-func (h *TransferHandler) History(w http.ResponseWriter, r *http.Request) {
+func (h *BridgeHandler) History(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, offset := parsePagination(q)
 
-	transfers, err := h.repo.List(r.Context(), db.ListFilter{
+	bridges, err := h.repo.List(r.Context(), db.ListFilter{
 		Order:  q.Get("orderby"),
 		Limit:  limit,
 		Offset: offset,
@@ -66,14 +66,14 @@ func (h *TransferHandler) History(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	jsonOK(w, map[string]any{"data": transfers, "limit": limit, "offset": offset})
+	jsonOK(w, map[string]any{"data": bridges, "limit": limit, "offset": offset})
 }
 
 type StatsHandler struct {
-	repo transferRepository
+	repo BridgeDB
 }
 
-func NewStatsHandler(repo transferRepository) *StatsHandler {
+func NewStatsHandler(repo BridgeDB) *StatsHandler {
 	return &StatsHandler{repo: repo}
 }
 
