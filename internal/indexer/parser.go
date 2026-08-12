@@ -58,9 +58,29 @@ type fullEventPacketValue struct {
 
 // writeAckValue is the destination-chain ack event for a direct (non-union)
 // gno<->evm route. Voyager records completion this way instead of packet_recv.
+// Acknowledgement is the ABI-encoded Ack{tag, inner_ack} payload (see
+// ethabi.DecodeAck) — tag distinguishes a successful relay from an ack error.
 type writeAckValue struct {
-	ChannelID  int    `json:"channel_id"`
-	PacketHash string `json:"packet_hash"`
+	ChannelID       int    `json:"channel_id"`
+	PacketHash      string `json:"packet_hash"`
+	Acknowledgement string `json:"acknowledgement"`
+}
+
+// packetTimeoutValue is a single packet_timeout datagram submitted on the
+// source chain to refund the sender after the destination chain rejected the
+// packet (e.g. panicked on recv). Has no packet_hash, so it's matched the
+// same way as failed-table promise items: by timeout_timestamp + source channel.
+type packetTimeoutValue struct {
+	Packet struct {
+		SourceChannelID  int   `json:"source_channel_id"`
+		TimeoutTimestamp int64 `json:"timeout_timestamp"`
+	} `json:"packet"`
+}
+
+// PacketTimeoutFields is a matching key for one packet_timeout datagram.
+type PacketTimeoutFields struct {
+	TimeoutTimestamp int64
+	SrcChannelID     int
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -72,6 +92,12 @@ type ItemFields struct {
 	SrcChannelID     int
 	PacketHash       string
 	TxHash           string
+
+	// AckSuccess and AckError are only meaningful when EventType == "write_ack".
+	// AckSuccess is true unless the acknowledgement decodes to TAG_ACK_FAILURE,
+	// so an undecodable/missing acknowledgement is treated as success (prior behavior).
+	AckSuccess bool
+	AckError   string
 }
 
 // ParseItemFields extracts matching fields from:
@@ -108,10 +134,13 @@ func ParseItemFields(raw []byte) *ItemFields {
 			if err := json.Unmarshal(chainEvent.Event.Value, &ack); err != nil {
 				return nil
 			}
+			ackSuccess, ackErr := decodeAckOutcome(ack.Acknowledgement)
 			return &ItemFields{
 				EventType:  chainEvent.Event.Type,
 				PacketHash: ack.PacketHash,
 				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
+				AckSuccess: ackSuccess,
+				AckError:   ackErr,
 			}
 		}
 
@@ -125,6 +154,22 @@ func ParseItemFields(raw []byte) *ItemFields {
 		if chainEvent.Event.Type != "packet_send" && chainEvent.Event.Type != "packet_recv" && chainEvent.Event.Type != "write_ack" {
 			return nil
 		}
+
+		if chainEvent.Event.Type == "write_ack" {
+			var ack writeAckValue
+			if err := json.Unmarshal(chainEvent.Event.Value, &ack); err != nil {
+				return nil
+			}
+			ackSuccess, ackErr := decodeAckOutcome(ack.Acknowledgement)
+			return &ItemFields{
+				EventType:  chainEvent.Event.Type,
+				PacketHash: ack.PacketHash,
+				TxHash:     formatTxHash(chainEvent.TxHash, isGno),
+				AckSuccess: ackSuccess,
+				AckError:   ackErr,
+			}
+		}
+
 		var ev packetSendValue
 		if err := json.Unmarshal(chainEvent.Event.Value, &ev); err != nil {
 			return nil
@@ -179,6 +224,47 @@ func ParseItemFields(raw []byte) *ItemFields {
 		}
 	}
 	return nil
+}
+
+// ParsePacketTimeouts extracts every packet_timeout datagram from a
+// submit_multicall item — the transaction plugin bundles the refund-triggering
+// timeoutPacket/timeout_packet calls it submits on the source chain, and a
+// single multicall transaction can batch several packets' timeouts together.
+// Returns nil for irrelevant item types.
+func ParsePacketTimeouts(raw []byte) []PacketTimeoutFields {
+	var outer typedValue
+	if err := json.Unmarshal(raw, &outer); err != nil || outer.Type != "call" {
+		return nil
+	}
+	var callVal typedValue
+	if err := json.Unmarshal(outer.Value, &callVal); err != nil || callVal.Type != "plugin" {
+		return nil
+	}
+	var body pluginBody
+	if err := json.Unmarshal(callVal.Value, &body); err != nil || body.Message.Type != "submit_multicall" {
+		return nil
+	}
+
+	var items []typedValue
+	if err := json.Unmarshal(body.Message.Value, &items); err != nil {
+		return nil
+	}
+
+	var out []PacketTimeoutFields
+	for _, item := range items {
+		if item.Type != "packet_timeout" {
+			continue
+		}
+		var pt packetTimeoutValue
+		if err := json.Unmarshal(item.Value, &pt); err != nil {
+			continue
+		}
+		out = append(out, PacketTimeoutFields{
+			TimeoutTimestamp: pt.Packet.TimeoutTimestamp,
+			SrcChannelID:     pt.Packet.SourceChannelID,
+		})
+	}
+	return out
 }
 
 // Parse converts a raw voyager item into a Transfer.
@@ -332,6 +418,24 @@ func decodePacketData(t *db.Transfer, hexData string) error {
 	t.QuoteAmount = order.QuoteAmount.String()
 
 	return nil
+}
+
+// decodeAckOutcome reports whether a write_ack's acknowledgement tag is
+// TAG_ACK_SUCCESS, along with a human-readable error when it is not.
+// An empty or undecodable acknowledgement defaults to success, preserving
+// prior behavior for sources that don't carry this field.
+func decodeAckOutcome(hexAck string) (success bool, ackErr string) {
+	if hexAck == "" {
+		return true, ""
+	}
+	ack, err := ethabi.DecodeAck(hexAck)
+	if err != nil {
+		return true, ""
+	}
+	if ack.Success() {
+		return true, ""
+	}
+	return false, renderBytes(ack.InnerAck)
 }
 
 func chainFromPlugin(plugin string) string {
