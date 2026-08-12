@@ -26,9 +26,9 @@ type BridgeDB interface {
 	DedupeByPacketHash(ctx context.Context) (int64, error)
 	Insert(ctx context.Context, t *db.BridgeRecord) error
 	MarkProcessing(ctx context.Context, ids []int64) error
-	MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) error
+	MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) (bool, error)
 	SetTxIn(ctx context.Context, packetHash, txIn string) error
-	MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) error
+	MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) (bool, error)
 	GetCursor(ctx context.Context, name string) (int64, error)
 	SetCursor(ctx context.Context, name string, id int64) error
 	FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error)

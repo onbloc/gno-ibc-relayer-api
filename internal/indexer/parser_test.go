@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/onbloc/gno-ibc-relayer-api/internal/config"
+	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
 // ── isGnoPlugin ───────────────────────────────────────────────────────────────
@@ -812,6 +813,27 @@ func TestParse_ReturnsNil(t *testing.T) {
 		got, err := Parse(1, raw, time.Now(), testChains)
 		if err != nil || got != nil {
 			t.Errorf("expected (nil, nil), got (%v, %v)", got, err)
+		}
+	})
+}
+
+// ── decodePacketData ─────────────────────────────────────────────────────────
+
+func TestDecodePacketData(t *testing.T) {
+	t.Run("empty hex is a no-op", func(t *testing.T) {
+		bridge := &db.BridgeRecord{}
+		if err := decodePacketData(bridge, ""); err != nil {
+			t.Fatalf("decodePacketData() error: %v", err)
+		}
+		if bridge.FromAddress != "" || bridge.BaseToken != "" {
+			t.Errorf("decodePacketData() modified bridge on empty hex: %+v", bridge)
+		}
+	})
+
+	t.Run("invalid hex returns error", func(t *testing.T) {
+		bridge := &db.BridgeRecord{}
+		if err := decodePacketData(bridge, "0xnothex"); err == nil {
+			t.Error("decodePacketData() want error for invalid hex, got nil")
 		}
 	})
 }

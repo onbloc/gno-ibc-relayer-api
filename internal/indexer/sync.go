@@ -173,12 +173,15 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 		if err := rows.Scan(&id, &parents, &errMsg); err != nil {
 			return err
 		}
-		lastID = id
 
-		if err := idx.bridgeDB.MarkFailed(ctx, id, errMsg, ""); err != nil {
+		if _, err := idx.bridgeDB.MarkFailed(ctx, id, errMsg, ""); err != nil {
+			// A transient failure here must not advance the cursor past this row —
+			// otherwise it would never be retried. Stop the batch; the next poll
+			// picks back up from the last successfully-marked id.
 			log.Printf("indexer: mark failed id=%d: %v", id, err)
-			continue
+			break
 		}
+		lastID = id
 
 		ancestorID, err := idx.traceFailedAncestor(ctx, parents)
 		if err != nil {
@@ -188,7 +191,7 @@ func (idx *Indexer) syncFailed(ctx context.Context) error {
 		if ancestorID == 0 || ancestorID == id {
 			continue
 		}
-		if err := idx.bridgeDB.MarkFailed(ctx, ancestorID, errMsg, ""); err != nil {
+		if _, err := idx.bridgeDB.MarkFailed(ctx, ancestorID, errMsg, ""); err != nil {
 			log.Printf("indexer: mark failed ancestor id=%d: %v", ancestorID, err)
 			continue
 		}

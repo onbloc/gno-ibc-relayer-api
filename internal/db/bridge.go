@@ -6,8 +6,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// pgxQuerier is the subset of *pgxpool.Pool that BridgeDB needs. Narrowed here
+// so tests can inject a mock (e.g. pgxmock) instead of a real database.
+type pgxQuerier interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 type BridgeStatus int
 
@@ -49,7 +58,7 @@ type BridgeRecord struct {
 }
 
 type BridgeDB struct {
-	db *pgxpool.Pool
+	db pgxQuerier
 }
 
 func New(db *pgxpool.Pool) *BridgeDB {
@@ -149,18 +158,29 @@ func (r *BridgeDB) MarkProcessing(ctx context.Context, ids []int64) error {
 	return err
 }
 
-// MarkDone marks the bridge complete; txIn is a fallback used only if SetTxIn hasn't already set tx_in.
-func (r *BridgeDB) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) error {
-	_, err := r.db.Exec(ctx,
+// MarkDone marks the bridge complete; txIn is a fallback used only if SetTxIn hasn't already
+// set tx_in. The returned bool reports whether a row was actually matched — false (with a nil
+// error) means id doesn't exist, or the bridge already reached a terminal state (done or
+// failed), which must never be overwritten.
+func (r *BridgeDB) MarkDone(ctx context.Context, id int64, doneAt time.Time, txIn string) (bool, error) {
+	tag, err := r.db.Exec(ctx,
 		`UPDATE transfers SET status=$1, done_at=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
 		int(StatusDone), doneAt, txIn, id,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // SetTxIn records the destination-chain receive tx hash, matched by packet_hash; never
-// overwrites an existing value.
+// overwrites an existing value. A no-op if txIn is empty — writing "" would set tx_in to a
+// non-NULL empty string, permanently blocking this row from ever being corrected by a real
+// hash (the WHERE clause only matches tx_in IS NULL).
 func (r *BridgeDB) SetTxIn(ctx context.Context, packetHash, txIn string) error {
+	if txIn == "" {
+		return nil
+	}
 	_, err := r.db.Exec(ctx,
 		`UPDATE transfers SET tx_in=$1 WHERE packet_hash=$2 AND tx_in IS NULL`,
 		txIn, packetHash,
@@ -169,24 +189,34 @@ func (r *BridgeDB) SetTxIn(ctx context.Context, packetHash, txIn string) error {
 }
 
 // MarkFailed marks the bridge failed; txIn is a fallback used only if SetTxIn hasn't already
-// set tx_in (pass "" if no hash is available).
-func (r *BridgeDB) MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) error {
-	_, err := r.db.Exec(ctx,
-		`UPDATE transfers SET status=$1, err_msg=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $1`,
-		int(StatusFailed), errMsg, txIn, id,
+// set tx_in (pass "" if no hash is available). The returned bool reports whether a row was
+// actually matched — false (with a nil error) means id doesn't exist, or the bridge already
+// reached a terminal state (done or failed), which must never be overwritten.
+func (r *BridgeDB) MarkFailed(ctx context.Context, id int64, errMsg string, txIn string) (bool, error) {
+	tag, err := r.db.Exec(ctx,
+		`UPDATE transfers SET status=$1, err_msg=$2, tx_in=COALESCE(tx_in, NULLIF($3, '')) WHERE id=$4 AND status < $5`,
+		int(StatusFailed), errMsg, txIn, id, int(StatusDone),
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ── cursor ────────────────────────────────────────────────────────────────────
 
+// GetCursor returns 0 if no cursor has been set yet for name. A genuine query error is
+// propagated rather than treated as "no cursor", so callers don't silently restart from 0.
 func (r *BridgeDB) GetCursor(ctx context.Context, name string) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT last_id FROM indexer_cursors WHERE name=$1`, name,
 	).Scan(&id)
 	if err != nil {
-		return 0, nil
+		if err == pgx.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
 	}
 	return id, nil
 }
@@ -200,11 +230,14 @@ func (r *BridgeDB) SetCursor(ctx context.Context, name string, id int64) error {
 	return err
 }
 
+// FindByTimeoutAndChannel finds an in-flight (not yet done or failed) bridge for a
+// packet_timeout to mark failed. Terminal bridges are excluded — there is nothing useful
+// to do with one here, since the only action a caller takes with the result is MarkFailed.
 func (r *BridgeDB) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp int64, srcChannelID int) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE timeout_timestamp=$1 AND src_channel_id=$2 AND status < $3 LIMIT 1`,
-		timeoutTimestamp, srcChannelID, int(StatusFailed),
+		timeoutTimestamp, srcChannelID, int(StatusDone),
 	).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return 0, nil
@@ -212,6 +245,11 @@ func (r *BridgeDB) FindByTimeoutAndChannel(ctx context.Context, timeoutTimestamp
 	return id, err
 }
 
+// FindByPacketHash finds a bridge by packet_hash, including ones already marked done.
+// Unlike the other finders, this one is intentionally not narrowed to in-flight rows: a
+// packet_recv arriving after the bridge is already done (e.g. out-of-order with write_ack)
+// must still be able to correct tx_in via SetTxIn. Callers that instead intend to mutate
+// status (e.g. MarkDone/MarkFailed) rely on those methods' own terminal-state guards.
 func (r *BridgeDB) FindByPacketHash(ctx context.Context, packetHash string) (int64, error) {
 	var id int64
 	err := r.db.QueryRow(ctx,
@@ -224,6 +262,8 @@ func (r *BridgeDB) FindByPacketHash(ctx context.Context, packetHash string) (int
 	return id, err
 }
 
+// FindAncestor finds an in-flight (not yet done or failed) ancestor to mark failed. Terminal
+// ancestors are excluded — the only action a caller takes with the result is MarkFailed.
 func (r *BridgeDB) FindAncestor(ctx context.Context, ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -231,7 +271,7 @@ func (r *BridgeDB) FindAncestor(ctx context.Context, ids []int64) (int64, error)
 	var id int64
 	err := r.db.QueryRow(ctx,
 		`SELECT id FROM transfers WHERE id = ANY($1) AND status < $2 LIMIT 1`,
-		ids, int(StatusFailed),
+		ids, int(StatusDone),
 	).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return 0, nil

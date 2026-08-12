@@ -166,9 +166,13 @@ func (idx *Indexer) markPacketTimeoutFailed(ctx context.Context, pt PacketTimeou
 	if bridgeID == 0 {
 		return
 	}
-	if err := idx.bridgeDB.MarkFailed(ctx, bridgeID, "packet timed out; refunded on source chain", ""); err != nil {
+	matched, err := idx.bridgeDB.MarkFailed(ctx, bridgeID, "packet timed out; refunded on source chain", "")
+	if err != nil {
 		log.Printf("indexer: packet_timeout mark failed id=%d: %v", bridgeID, err)
 		return
+	}
+	if !matched {
+		return // already done/failed; must not be overwritten
 	}
 	log.Printf("indexer: bridge id=%d failed via packet_timeout %s", bridgeID, via)
 }
@@ -176,17 +180,25 @@ func (idx *Indexer) markPacketTimeoutFailed(ctx context.Context, pt PacketTimeou
 // markWriteAckResult marks the bridge done or failed based on the decoded write_ack outcome.
 func (idx *Indexer) markWriteAckResult(ctx context.Context, bridgeID int64, createdAt time.Time, fields *ItemFields, via string) {
 	if fields.AckSuccess {
-		if err := idx.bridgeDB.MarkDone(ctx, bridgeID, createdAt, fields.TxHash); err != nil {
+		matched, err := idx.bridgeDB.MarkDone(ctx, bridgeID, createdAt, fields.TxHash)
+		if err != nil {
 			log.Printf("indexer: write_ack mark done id=%d (%s): %v", bridgeID, via, err)
 			return
+		}
+		if !matched {
+			return // already done/failed; nothing changed
 		}
 		log.Printf("indexer: bridge id=%d done via write_ack %s", bridgeID, via)
 		return
 	}
 
-	if err := idx.bridgeDB.MarkFailed(ctx, bridgeID, ackErrMessage(fields.AckError), fields.TxHash); err != nil {
+	matched, err := idx.bridgeDB.MarkFailed(ctx, bridgeID, ackErrMessage(fields.AckError), fields.TxHash)
+	if err != nil {
 		log.Printf("indexer: write_ack mark ack error failed id=%d (%s): %v", bridgeID, via, err)
 		return
+	}
+	if !matched {
+		return // already done/failed; must not be overwritten
 	}
 	log.Printf("indexer: bridge id=%d failed via write_ack ack error %s", bridgeID, via)
 }
@@ -245,29 +257,46 @@ func (idx *Indexer) runFailedListener(ctx context.Context) error {
 			continue
 		}
 
-		if err := idx.bridgeDB.MarkFailed(ctx, id, errMsg, ""); err == nil {
-			log.Printf("indexer: failed bridge id=%d (direct)", id)
-			continue
-		}
-
-		fields := ParseItemFields(item)
-		if fields == nil {
-			continue
-		}
-		bridgeID, err := idx.bridgeDB.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
-		if err != nil {
-			log.Printf("indexer: failed find bridge timeout=%d ch=%d: %v", fields.TimeoutTimestamp, fields.SrcChannelID, err)
-			continue
-		}
-		if bridgeID == 0 {
-			continue
-		}
-		if err := idx.bridgeDB.MarkFailed(ctx, bridgeID, errMsg, fields.TxHash); err != nil {
-			log.Printf("indexer: failed mark id=%d: %v", bridgeID, err)
-			continue
-		}
-		log.Printf("indexer: failed bridge id=%d via promise notify", bridgeID)
+		idx.handleFailedNotification(ctx, id, item, errMsg)
 	}
+}
+
+// handleFailedNotification marks the bridge matching a failed-table row failed. It first
+// tries id directly (the common case for non-batched items); if that doesn't match any
+// tracked bridge, it falls back to matching the promise-batch item by
+// timeout_timestamp + src_channel_id.
+func (idx *Indexer) handleFailedNotification(ctx context.Context, id int64, item []byte, errMsg string) {
+	matched, err := idx.bridgeDB.MarkFailed(ctx, id, errMsg, "")
+	if err != nil {
+		log.Printf("indexer: failed mark id=%d: %v", id, err)
+		return
+	}
+	if matched {
+		log.Printf("indexer: failed bridge id=%d (direct)", id)
+		return
+	}
+
+	fields := ParseItemFields(item)
+	if fields == nil {
+		return
+	}
+	bridgeID, err := idx.bridgeDB.FindByTimeoutAndChannel(ctx, fields.TimeoutTimestamp, fields.SrcChannelID)
+	if err != nil {
+		log.Printf("indexer: failed find bridge timeout=%d ch=%d: %v", fields.TimeoutTimestamp, fields.SrcChannelID, err)
+		return
+	}
+	if bridgeID == 0 {
+		return
+	}
+	matched, err = idx.bridgeDB.MarkFailed(ctx, bridgeID, errMsg, fields.TxHash)
+	if err != nil {
+		log.Printf("indexer: failed mark id=%d: %v", bridgeID, err)
+		return
+	}
+	if !matched {
+		return // already done/failed; must not be overwritten
+	}
+	log.Printf("indexer: failed bridge id=%d via promise notify", bridgeID)
 }
 
 // ackErrMessage formats a write_ack TAG_ACK_FAILURE's decoded inner_ack for storage in err_msg.
