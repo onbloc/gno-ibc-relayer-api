@@ -1,11 +1,12 @@
 module github.com/onbloc/gno-ibc-relayer-api
 
-go 1.22
+go 1.22.0
 
 require (
 	github.com/BurntSushi/toml v1.4.0
 	github.com/go-chi/chi/v5 v5.2.1
-	github.com/jackc/pgx/v5 v5.7.2
+	github.com/jackc/pgx/v5 v5.7.4
+	github.com/pashagolub/pgxmock/v4 v4.6.0
 )
 
 require (

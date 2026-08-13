@@ -9,7 +9,7 @@ import (
 type Config struct {
 	Server        ServerConfig   `toml:"server"`
 	RelayerDB     DBConfig       `toml:"relayer_db"`
-	AppDB         DBConfig       `toml:"app_db"`
+	BridgeDB      DBConfig       `toml:"app_db"`
 	Indexer       IndexerConfig  `toml:"indexer"`
 	ChannelChains []ChannelChain `toml:"channel_chains"`
 }

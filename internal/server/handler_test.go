@@ -13,20 +13,20 @@ import (
 	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
 )
 
-// stubStore is a test double for transferRepository.
+// stubStore is a test double for BridgeDB.
 type stubStore struct {
-	transfer  *db.Transfer
-	transfers []*db.Transfer
-	count     int64
-	err       error
+	bridge  *db.BridgeRecord
+	bridges []*db.BridgeRecord
+	count   int64
+	err     error
 }
 
-func (s *stubStore) GetByPacketHash(_ context.Context, _ string) (*db.Transfer, error) {
-	return s.transfer, s.err
+func (s *stubStore) GetByPacketHash(_ context.Context, _ string) (*db.BridgeRecord, error) {
+	return s.bridge, s.err
 }
 
-func (s *stubStore) List(_ context.Context, _ db.ListFilter) ([]*db.Transfer, error) {
-	return s.transfers, s.err
+func (s *stubStore) List(_ context.Context, _ db.ListFilter) ([]*db.BridgeRecord, error) {
+	return s.bridges, s.err
 }
 
 func (s *stubStore) Count(_ context.Context) (int64, error) {
@@ -43,13 +43,13 @@ func TestParsePagination(t *testing.T) {
 	}{
 		{"", 20, 0},
 		{"limit=10", 10, 0},
-		{"limit=100", 100, 0},  // max allowed
-		{"limit=101", 20, 0},   // exceeds max → default
-		{"limit=0", 20, 0},     // zero → default
-		{"limit=-5", 20, 0},    // negative → default
+		{"limit=100", 100, 0}, // max allowed
+		{"limit=101", 20, 0},  // exceeds max → default
+		{"limit=0", 20, 0},    // zero → default
+		{"limit=-5", 20, 0},   // negative → default
 		{"limit=5&offset=10", 5, 10},
-		{"limit=abc", 20, 0},   // non-numeric → default
-		{"offset=abc", 20, 0},  // non-numeric offset → 0
+		{"limit=abc", 20, 0},  // non-numeric → default
+		{"offset=abc", 20, 0}, // non-numeric offset → 0
 	}
 	for _, tc := range cases {
 		u, _ := url.Parse("/?" + tc.query)
@@ -64,8 +64,8 @@ func TestParsePagination(t *testing.T) {
 // ── GetByPacketHash ───────────────────────────────────────────────────────────
 
 func TestGetByPacketHash_Found(t *testing.T) {
-	want := &db.Transfer{ID: 1, PacketHash: "abc123"}
-	h := NewTransferHandler(&stubStore{transfer: want})
+	want := &db.BridgeRecord{ID: 1, PacketHash: "abc123"}
+	h := NewBridgeHandler(&stubStore{bridge: want})
 
 	req := httptest.NewRequest(http.MethodGet, "/status/abc123", nil)
 	rctx := chi.NewRouteContext()
@@ -78,7 +78,7 @@ func TestGetByPacketHash_Found(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	var got db.Transfer
+	var got db.BridgeRecord
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestGetByPacketHash_Found(t *testing.T) {
 }
 
 func TestGetByPacketHash_NotFound(t *testing.T) {
-	h := NewTransferHandler(&stubStore{err: errors.New("not found")})
+	h := NewBridgeHandler(&stubStore{err: errors.New("not found")})
 
 	req := httptest.NewRequest(http.MethodGet, "/status/missing", nil)
 	rctx := chi.NewRouteContext()
@@ -106,11 +106,11 @@ func TestGetByPacketHash_NotFound(t *testing.T) {
 // ── ListByWallet ──────────────────────────────────────────────────────────────
 
 func TestListByWallet(t *testing.T) {
-	transfers := []*db.Transfer{
+	bridges := []*db.BridgeRecord{
 		{ID: 1, PacketHash: "hash1"},
 		{ID: 2, PacketHash: "hash2"},
 	}
-	h := NewTransferHandler(&stubStore{transfers: transfers})
+	h := NewBridgeHandler(&stubStore{bridges: bridges})
 
 	req := httptest.NewRequest(http.MethodGet, "/wallet/g1abc?limit=10&offset=5", nil)
 	rctx := chi.NewRouteContext()
@@ -124,15 +124,15 @@ func TestListByWallet(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Data   []*db.Transfer `json:"data"`
-		Limit  int            `json:"limit"`
-		Offset int            `json:"offset"`
+		Data   []*db.BridgeRecord `json:"data"`
+		Limit  int                `json:"limit"`
+		Offset int                `json:"offset"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Data) != len(transfers) {
-		t.Errorf("data count = %d, want %d", len(resp.Data), len(transfers))
+	if len(resp.Data) != len(bridges) {
+		t.Errorf("data count = %d, want %d", len(resp.Data), len(bridges))
 	}
 	if resp.Limit != 10 {
 		t.Errorf("limit = %d, want 10", resp.Limit)
@@ -143,7 +143,7 @@ func TestListByWallet(t *testing.T) {
 }
 
 func TestListByWallet_Error(t *testing.T) {
-	h := NewTransferHandler(&stubStore{err: errors.New("db error")})
+	h := NewBridgeHandler(&stubStore{err: errors.New("db error")})
 
 	req := httptest.NewRequest(http.MethodGet, "/wallet/g1abc", nil)
 	rctx := chi.NewRouteContext()
@@ -161,8 +161,8 @@ func TestListByWallet_Error(t *testing.T) {
 // ── History ───────────────────────────────────────────────────────────────────
 
 func TestHistory(t *testing.T) {
-	transfers := []*db.Transfer{{ID: 1, PacketHash: "h1"}}
-	h := NewTransferHandler(&stubStore{transfers: transfers})
+	bridges := []*db.BridgeRecord{{ID: 1, PacketHash: "h1"}}
+	h := NewBridgeHandler(&stubStore{bridges: bridges})
 
 	req := httptest.NewRequest(http.MethodGet, "/history?limit=5", nil)
 	w := httptest.NewRecorder()
@@ -172,8 +172,8 @@ func TestHistory(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	var resp struct {
-		Data  []*db.Transfer `json:"data"`
-		Limit int            `json:"limit"`
+		Data  []*db.BridgeRecord `json:"data"`
+		Limit int                `json:"limit"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -187,7 +187,7 @@ func TestHistory(t *testing.T) {
 }
 
 func TestHistory_Error(t *testing.T) {
-	h := NewTransferHandler(&stubStore{err: errors.New("db error")})
+	h := NewBridgeHandler(&stubStore{err: errors.New("db error")})
 
 	req := httptest.NewRequest(http.MethodGet, "/history", nil)
 	w := httptest.NewRecorder()

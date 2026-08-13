@@ -15,12 +15,12 @@ type Server struct {
 	mux *chi.Mux
 }
 
-func New(cfg config.ServerConfig, repo *db.Store) *Server {
+func New(cfg config.ServerConfig, repo *db.BridgeDB) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	th := NewTransferHandler(repo)
+	th := NewBridgeHandler(repo)
 	sh := NewStatsHandler(repo)
 
 	r.Get("/status/{packet_hash}", th.GetByPacketHash)
