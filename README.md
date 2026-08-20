@@ -251,3 +251,27 @@ curl http://localhost:8080/summary
   "total": 1024
 }
 ```
+
+---
+
+### GET `/summary/recent`
+
+Returns a per-status breakdown over the most recently created transfers. Result is cached in-process for 5s to avoid re-running the aggregate query on every poll.
+
+| Parameter | Type | Required | Description                                  |
+|-----------|------|----------|-----------------------------------------------|
+| `limit`   | int  | no       | Number of most recent transfers to bucket, default 1000, max 5000 |
+
+```bash
+curl "http://localhost:8080/summary/recent?limit=1000"
+```
+
+```json
+{
+  "total": 1000,
+  "detected": 10,
+  "processing": 20,
+  "succeeded": 900,
+  "failed": 70
+}
+```
