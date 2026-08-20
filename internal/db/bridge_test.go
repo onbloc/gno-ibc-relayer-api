@@ -735,3 +735,38 @@ func TestBridgeDB_Count(t *testing.T) {
 	}
 	expectMet(t, mock)
 }
+
+func TestBridgeDB_CountRecentByStatus(t *testing.T) {
+	bdb, mock := newMockBridgeDB(t)
+	ctx := context.Background()
+
+	mock.ExpectQuery("FROM \\(SELECT status FROM transfers ORDER BY created_at DESC LIMIT").
+		WithArgs(int(StatusDetected), int(StatusProcessing), int(StatusDone), int(StatusFailed), 1000).
+		WillReturnRows(pgxmock.NewRows([]string{"total", "detected", "processing", "succeeded", "failed"}).
+			AddRow(int64(1000), int64(10), int64(20), int64(900), int64(70)))
+
+	got, err := bdb.CountRecentByStatus(ctx, 1000)
+	if err != nil {
+		t.Fatalf("CountRecentByStatus() error: %v", err)
+	}
+	want := &StatusSummary{Total: 1000, Detected: 10, Processing: 20, Succeeded: 900, Failed: 70}
+	if *got != *want {
+		t.Errorf("CountRecentByStatus() = %+v, want %+v", got, want)
+	}
+	expectMet(t, mock)
+}
+
+func TestBridgeDB_CountRecentByStatus_QueryError(t *testing.T) {
+	bdb, mock := newMockBridgeDB(t)
+	ctx := context.Background()
+
+	wantErr := errors.New("db down")
+	mock.ExpectQuery("FROM \\(SELECT status FROM transfers ORDER BY created_at DESC LIMIT").
+		WithArgs(int(StatusDetected), int(StatusProcessing), int(StatusDone), int(StatusFailed), 1000).
+		WillReturnError(wantErr)
+
+	if _, err := bdb.CountRecentByStatus(ctx, 1000); !errors.Is(err, wantErr) {
+		t.Errorf("CountRecentByStatus() error = %v, want %v", err, wantErr)
+	}
+	expectMet(t, mock)
+}

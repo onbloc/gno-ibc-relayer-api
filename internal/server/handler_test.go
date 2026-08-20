@@ -18,7 +18,10 @@ type stubStore struct {
 	bridge  *db.BridgeRecord
 	bridges []*db.BridgeRecord
 	count   int64
+	summary *db.StatusSummary
 	err     error
+
+	recentLimits []int // limit passed to each CountRecentByStatus call, in order
 }
 
 func (s *stubStore) GetByPacketHash(_ context.Context, _ string) (*db.BridgeRecord, error) {
@@ -31,6 +34,11 @@ func (s *stubStore) List(_ context.Context, _ db.ListFilter) ([]*db.BridgeRecord
 
 func (s *stubStore) Count(_ context.Context) (int64, error) {
 	return s.count, s.err
+}
+
+func (s *stubStore) CountRecentByStatus(_ context.Context, limit int) (*db.StatusSummary, error) {
+	s.recentLimits = append(s.recentLimits, limit)
+	return s.summary, s.err
 }
 
 // ── parsePagination ───────────────────────────────────────────────────────────
@@ -227,6 +235,85 @@ func TestSummary_Error(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/summary", nil)
 	w := httptest.NewRecorder()
 	h.Summary(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+// ── parseRecentLimit ──────────────────────────────────────────────────────────
+
+func TestParseRecentLimit(t *testing.T) {
+	cases := []struct {
+		query string
+		want  int
+	}{
+		{"", defaultRecentLimit},
+		{"limit=500", 500},
+		{"limit=5000", 5000},               // max allowed
+		{"limit=5001", defaultRecentLimit}, // exceeds max -> default
+		{"limit=0", defaultRecentLimit},
+		{"limit=-5", defaultRecentLimit},
+		{"limit=abc", defaultRecentLimit},
+	}
+	for _, tc := range cases {
+		u, _ := url.Parse("/?" + tc.query)
+		if got := parseRecentLimit(u.Query()); got != tc.want {
+			t.Errorf("query=%q: parseRecentLimit() = %d, want %d", tc.query, got, tc.want)
+		}
+	}
+}
+
+// ── RecentSummary ─────────────────────────────────────────────────────────────
+
+func TestRecentSummary(t *testing.T) {
+	want := &db.StatusSummary{Total: 1000, Detected: 10, Processing: 20, Succeeded: 900, Failed: 70}
+	store := &stubStore{summary: want}
+	h := NewStatsHandler(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/summary/recent?limit=1000", nil)
+	w := httptest.NewRecorder()
+	h.RecentSummary(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got db.StatusSummary
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got != *want {
+		t.Errorf("RecentSummary() = %+v, want %+v", got, want)
+	}
+	if len(store.recentLimits) != 1 || store.recentLimits[0] != 1000 {
+		t.Errorf("CountRecentByStatus called with limits %v, want [1000]", store.recentLimits)
+	}
+}
+
+func TestRecentSummary_CachesWithinTTL(t *testing.T) {
+	store := &stubStore{summary: &db.StatusSummary{Total: 1000}}
+	h := NewStatsHandler(store)
+
+	for i := range 3 {
+		req := httptest.NewRequest(http.MethodGet, "/summary/recent", nil)
+		w := httptest.NewRecorder()
+		h.RecentSummary(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("call %d: status = %d, want 200", i, w.Code)
+		}
+	}
+
+	if len(store.recentLimits) != 1 {
+		t.Errorf("CountRecentByStatus called %d times within TTL, want 1", len(store.recentLimits))
+	}
+}
+
+func TestRecentSummary_Error(t *testing.T) {
+	h := NewStatsHandler(&stubStore{err: errors.New("db error")})
+
+	req := httptest.NewRequest(http.MethodGet, "/summary/recent", nil)
+	w := httptest.NewRecorder()
+	h.RecentSummary(w, req)
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)

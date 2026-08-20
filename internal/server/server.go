@@ -27,6 +27,7 @@ func New(cfg config.ServerConfig, repo *db.BridgeDB) *Server {
 	r.Get("/wallet/{sender_address}", th.ListByWallet)
 	r.Get("/history", th.History)
 	r.Get("/summary", sh.Summary)
+	r.Get("/summary/recent", sh.RecentSummary)
 
 	return &Server{cfg: cfg, mux: r}
 }

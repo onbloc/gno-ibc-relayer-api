@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/onbloc/gno-ibc-relayer-api/internal/db"
@@ -14,6 +15,7 @@ type BridgeDB interface {
 	GetByPacketHash(ctx context.Context, packetHash string) (*db.BridgeRecord, error)
 	List(ctx context.Context, f db.ListFilter) ([]*db.BridgeRecord, error)
 	Count(ctx context.Context) (int64, error)
+	CountRecentByStatus(ctx context.Context, limit int) (*db.StatusSummary, error)
 }
 
 type BridgeHandler struct {
@@ -69,12 +71,19 @@ func (h *BridgeHandler) History(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"data": bridges, "limit": limit, "offset": offset})
 }
 
+const (
+	defaultRecentLimit = 1000
+	maxRecentLimit     = 5000
+	recentCacheTTL     = 5 * time.Second
+)
+
 type StatsHandler struct {
-	repo BridgeDB
+	repo  BridgeDB
+	cache *ttlCache[int, *db.StatusSummary]
 }
 
 func NewStatsHandler(repo BridgeDB) *StatsHandler {
-	return &StatsHandler{repo: repo}
+	return &StatsHandler{repo: repo, cache: newTTLCache[int, *db.StatusSummary](recentCacheTTL)}
 }
 
 // GET /summary
@@ -85,6 +94,29 @@ func (h *StatsHandler) Summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"total": count})
+}
+
+// GET /summary/recent?limit=1000
+// Result is cached for recentCacheTTL to avoid re-running the aggregate on every poll.
+func (h *StatsHandler) RecentSummary(w http.ResponseWriter, r *http.Request) {
+	limit := parseRecentLimit(r.URL.Query())
+
+	s, err := h.cache.getOrLoad(limit, func() (*db.StatusSummary, error) {
+		return h.repo.CountRecentByStatus(r.Context(), limit)
+	})
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonOK(w, s)
+}
+
+func parseRecentLimit(q interface{ Get(string) string }) int {
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > maxRecentLimit {
+		limit = defaultRecentLimit
+	}
+	return limit
 }
 
 func parsePagination(q interface{ Get(string) string }) (limit, offset int) {

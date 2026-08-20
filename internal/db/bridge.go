@@ -387,6 +387,35 @@ func (r *BridgeDB) Count(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+// StatusSummary is a per-status count over some window of transfers.
+type StatusSummary struct {
+	Total      int64 `json:"total"`
+	Detected   int64 `json:"detected"`
+	Processing int64 `json:"processing"`
+	Succeeded  int64 `json:"succeeded"`
+	Failed     int64 `json:"failed"`
+}
+
+// CountRecentByStatus buckets the `limit` most recently created transfers by status, using the
+// existing idx_transfers_created_at index (no new index needed).
+func (r *BridgeDB) CountRecentByStatus(ctx context.Context, limit int) (*StatusSummary, error) {
+	s := &StatusSummary{}
+	err := r.db.QueryRow(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(*) FILTER (WHERE status=$1),
+		    COUNT(*) FILTER (WHERE status=$2),
+		    COUNT(*) FILTER (WHERE status=$3),
+		    COUNT(*) FILTER (WHERE status=$4)
+		FROM (SELECT status FROM transfers ORDER BY created_at DESC LIMIT $5) recent`,
+		int(StatusDetected), int(StatusProcessing), int(StatusDone), int(StatusFailed), limit,
+	).Scan(&s.Total, &s.Detected, &s.Processing, &s.Succeeded, &s.Failed)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // ── scan ─────────────────────────────────────────────────────────────────────
 
 type scanner interface {
